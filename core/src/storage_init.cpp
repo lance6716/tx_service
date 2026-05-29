@@ -44,6 +44,8 @@
 #include "eloq_data_store_service/rocksdb_cloud_data_store_factory.h"
 #elif defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB)
 #include "eloq_data_store_service/rocksdb_data_store_factory.h"
+#elif defined(DATA_STORE_TYPE_ELOQDSS_TIKV)
+#include "eloq_data_store_service/tikv_data_store_factory.h"
 #elif defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
 #include "eloq_data_store_service/eloq_store_data_store_factory.h"
 #endif
@@ -287,6 +289,11 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
     EloqDS::RocksDBConfig rocksdb_config(config_reader, eloq_dss_data_path);
     auto ds_factory = std::make_unique<EloqDS::RocksDBDataStoreFactory>(
         rocksdb_config, core_config_.enable_cache_replacement);
+
+#elif defined(DATA_STORE_TYPE_ELOQDSS_TIKV)
+    EloqDS::TikvConfig tikv_config(config_reader);
+    auto ds_factory =
+        std::make_unique<EloqDS::TikvDataStoreFactory>(tikv_config);
 
 #elif defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
     EloqDS::EloqStoreConfig eloq_store_config(config_reader,

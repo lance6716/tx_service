@@ -7,7 +7,7 @@ set(METRICS_LIB "eloq-metrics" CACHE STRING "Metrics library name")
 
 # Options from original eloq CMakeLists
 set(WITH_DATA_STORE "ELOQDSS_ELOQSTORE" CACHE STRING "Which key-value storage to use")
-set_property(CACHE WITH_DATA_STORE PROPERTY STRINGS "DYNAMODB" "BIGTABLE" "ROCKSDB" "ELOQDSS_ROCKSDB" "ELOQDSS_ROCKSDB_CLOUD_S3" "ELOQDSS_ROCKSDB_CLOUD_GCS" "ELOQDSS_ELOQSTORE")
+set_property(CACHE WITH_DATA_STORE PROPERTY STRINGS "DYNAMODB" "BIGTABLE" "ROCKSDB" "ELOQDSS_ROCKSDB" "ELOQDSS_ROCKSDB_CLOUD_S3" "ELOQDSS_ROCKSDB_CLOUD_GCS" "ELOQDSS_ELOQSTORE" "ELOQDSS_TIKV")
 
 option(WITH_LOG_SERVICE "Compile with built-in log service." ON)
 option(OPEN_LOG_SERVICE "Compile with open log service." ON)
@@ -130,6 +130,20 @@ elseif(WITH_DATA_STORE STREQUAL "ELOQDSS_ELOQSTORE")
     add_compile_definitions(ELOQSTORE_WITH_TXSERVICE)
     set(ELOQSTORE_PARENT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/store_handler/eloq_data_store_service CACHE PATH "EloqStore parent directory")
     INCLUDE(${CMAKE_CURRENT_SOURCE_DIR}/store_handler/eloq_data_store_service/build_eloq_store.cmake)
+elseif(WITH_DATA_STORE STREQUAL "ELOQDSS_TIKV")
+    set(KV_STORAGE_VAL 3 CACHE STRING "eloq_ds" FORCE)
+    add_compile_definitions(DATA_STORE_TYPE_ELOQDSS_TIKV)
+    set(TIKV_CLIENT_C_ROOT "$ENV{TIKV_CLIENT_C_ROOT}" CACHE PATH "Path to a tikv/client-c checkout")
+    if(NOT TIKV_CLIENT_C_ROOT)
+        set(TIKV_CLIENT_C_ROOT "/home/lance/Projects/tikv-client-c" CACHE PATH "Path to a tikv/client-c checkout" FORCE)
+    endif()
+    if(NOT EXISTS "${TIKV_CLIENT_C_ROOT}/CMakeLists.txt")
+        message(FATAL_ERROR "WITH_DATA_STORE=ELOQDSS_TIKV requires TIKV_CLIENT_C_ROOT to point at a tikv/client-c checkout")
+    endif()
+    if(NOT TARGET kv_client)
+        set(ENABLE_TESTS OFF CACHE BOOL "Disable tikv-client-c tests when embedded in EloqDoc" FORCE)
+        add_subdirectory("${TIKV_CLIENT_C_ROOT}" "${CMAKE_BINARY_DIR}/tikv-client-c" EXCLUDE_FROM_ALL)
+    endif()
 else()
     message(FATAL_ERROR "Unset WITH_DATA_STORE")
 endif()
@@ -205,7 +219,7 @@ if((WITH_DATA_STORE STREQUAL "ROCKSDB_CLOUD_S3") OR (WITH_DATA_STORE STREQUAL "R
 endif()
 
 # Compile proto file for data store service
-if((WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3") OR (WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_GCS") OR (WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB") OR (WITH_DATA_STORE STREQUAL "ELOQDSS_ELOQSTORE"))
+if((WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3") OR (WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_GCS") OR (WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB") OR (WITH_DATA_STORE STREQUAL "ELOQDSS_ELOQSTORE") OR (WITH_DATA_STORE STREQUAL "ELOQDSS_TIKV"))
     set(DS_PROTO_DIR ${CMAKE_CURRENT_SOURCE_DIR}/store_handler/eloq_data_store_service)
     message(NOTICE "data store service proto dir: ${DS_PROTO_DIR}")
     set(PROTO_SRC ${DS_PROTO_DIR})
@@ -340,6 +354,23 @@ elseif(WITH_DATA_STORE STREQUAL "ELOQDSS_ELOQSTORE")
         store_handler/eloq_data_store_service/ds_request.pb.cc
         store_handler/eloq_data_store_service/eloq_store_config.cpp
     )
+elseif(WITH_DATA_STORE STREQUAL "ELOQDSS_TIKV")
+    SET(DATA_SUBSTRATE_SOURCES ${DATA_SUBSTRATE_SOURCES}
+        store_handler/data_store_service_client.cpp
+        store_handler/data_store_service_client_closure.cpp
+        store_handler/data_store_service_scanner.cpp
+        store_handler/store_util.cpp
+        store_handler/eloq_data_store_service/ini.c
+        store_handler/eloq_data_store_service/INIReader.cpp
+        store_handler/eloq_data_store_service/thread_worker_pool.cpp
+        store_handler/eloq_data_store_service/data_store_service.cpp
+        store_handler/eloq_data_store_service/data_store_fault_inject.cpp
+        store_handler/eloq_data_store_service/data_store_service_config.cpp
+        store_handler/eloq_data_store_service/ds_request.pb.cc
+        store_handler/eloq_data_store_service/tikv_config.cpp
+        store_handler/eloq_data_store_service/tikv_kv_client.cpp
+        store_handler/eloq_data_store_service/tikv_data_store.cpp
+    )
 elseif((WITH_DATA_STORE STREQUAL "ROCKSDB") OR (WITH_DATA_STORE STREQUAL "ROCKSDB_CLOUD_S3") OR(WITH_DATA_STORE STREQUAL "ROCKSDB_CLOUD_GCS"))
     SET(DATA_SUBSTRATE_SOURCES ${DATA_SUBSTRATE_SOURCES}
         store_handler/rocksdb_config.cpp
@@ -369,6 +400,8 @@ elseif(WITH_DATA_STORE STREQUAL "BIGTABLE")
     SET(DATA_SUBSTRATE_LINK_LIBS ${DATA_SUBSTRATE_LINK_LIBS} google-cloud-cpp::bigtable)
 elseif(WITH_DATA_STORE STREQUAL "ELOQDSS_ELOQSTORE")
     SET(DATA_SUBSTRATE_LINK_LIBS ${DATA_SUBSTRATE_LINK_LIBS} eloqstore)
+elseif(WITH_DATA_STORE STREQUAL "ELOQDSS_TIKV")
+    SET(DATA_SUBSTRATE_LINK_LIBS ${DATA_SUBSTRATE_LINK_LIBS} kv_client)
 endif()
 
 target_link_libraries(${DATA_SUBSTRATE_LIB} PUBLIC ${DATA_SUBSTRATE_LINK_LIBS})

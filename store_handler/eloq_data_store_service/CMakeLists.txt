@@ -54,7 +54,7 @@ message(NOTICE "WITH ASAN: ${WITH_ASAN}")
 
 # KV data store backend for redis server, Cassandra, DynamoDB, RocksDB Cloud
 set(WITH_DATA_STORE "ELOQDSS_ROCKSDB_CLOUD_S3" CACHE STRING "The KV data store to compile with")
-set_property(CACHE WITH_DATA_STORE PROPERTY STRINGS "ELOQDSS_ROCKSDB_CLOUD_S3" "ELOQDSS_ROCKSDB_CLOUD_GCS" "ELOQDSS_ROCKSDB" "ELOQDSS_ELOQSTORE")
+set_property(CACHE WITH_DATA_STORE PROPERTY STRINGS "ELOQDSS_ROCKSDB_CLOUD_S3" "ELOQDSS_ROCKSDB_CLOUD_GCS" "ELOQDSS_ROCKSDB" "ELOQDSS_ELOQSTORE" "ELOQDSS_TIKV")
 message(NOTICE "With DATA_STORE: ${WITH_DATA_STORE}")
 
 
@@ -68,6 +68,9 @@ elseif(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB")
   add_compile_definitions(DATA_STORE_TYPE_ELOQDSS_ROCKSDB)
 elseif (WITH_DATA_STORE STREQUAL "ELOQDSS_ELOQSTORE")
    add_compile_definitions(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
+elseif (WITH_DATA_STORE STREQUAL "ELOQDSS_TIKV")
+   set(KV_STORAGE_VAL 3 CACHE STRING "eloq_ds" FORCE)
+   add_compile_definitions(DATA_STORE_TYPE_ELOQDSS_TIKV)
 endif ()
 
 
@@ -288,6 +291,18 @@ if ((WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3") OR (WITH_DATA_STORE ST
 elseif (WITH_DATA_STORE STREQUAL "ELOQDSS_ELOQSTORE")
     set(ELOQSTORE_PARENT_DIR ${CMAKE_CURRENT_SOURCE_DIR} CACHE PATH "EloqStore parent directory")
     include(${PROJECT_SOURCE_DIR}/build_eloq_store.cmake)
+elseif (WITH_DATA_STORE STREQUAL "ELOQDSS_TIKV")
+    set(TIKV_CLIENT_C_ROOT "$ENV{TIKV_CLIENT_C_ROOT}" CACHE PATH "Path to a tikv/client-c checkout")
+    if(NOT TIKV_CLIENT_C_ROOT)
+        set(TIKV_CLIENT_C_ROOT "/home/lance/Projects/tikv-client-c" CACHE PATH "Path to a tikv/client-c checkout" FORCE)
+    endif()
+    if(NOT EXISTS "${TIKV_CLIENT_C_ROOT}/CMakeLists.txt")
+        message(FATAL_ERROR "WITH_DATA_STORE=ELOQDSS_TIKV requires TIKV_CLIENT_C_ROOT to point at a tikv/client-c checkout")
+    endif()
+    if(NOT TARGET kv_client)
+        set(ENABLE_TESTS OFF CACHE BOOL "Disable tikv-client-c tests when embedded in Eloq DSS" FORCE)
+        add_subdirectory("${TIKV_CLIENT_C_ROOT}" "${CMAKE_BINARY_DIR}/tikv-client-c" EXCLUDE_FROM_ALL)
+    endif()
 endif()
 
 
@@ -295,6 +310,8 @@ if ((WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3") OR (WITH_DATA_STORE ST
     SET(RESELOQ_LIBRARY ${RESELOQ_LIBRARY} ${ROCKSDB_LIBRARIES})
 elseif (WITH_DATA_STORE STREQUAL "ELOQDSS_ELOQSTORE")
     SET(RESELOQ_LIBRARY ${RESELOQ_LIBRARY} eloqstore)
+elseif (WITH_DATA_STORE STREQUAL "ELOQDSS_TIKV")
+    SET(RESELOQ_LIBRARY ${RESELOQ_LIBRARY} kv_client)
 endif ()
 
 
@@ -393,6 +410,12 @@ elseif (WITH_DATA_STORE STREQUAL "ELOQDSS_ELOQSTORE")
     SET(RESELOQ_SOURCES ${RESELOQ_SOURCES}
         eloq_store_config.cpp
         eloq_store_data_store.cpp
+    )
+elseif (WITH_DATA_STORE STREQUAL "ELOQDSS_TIKV")
+    SET(RESELOQ_SOURCES ${RESELOQ_SOURCES}
+        tikv_config.cpp
+        tikv_kv_client.cpp
+        tikv_data_store.cpp
     )
 endif ()
 

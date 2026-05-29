@@ -57,6 +57,8 @@ namespace GFLAGS_NAMESPACE = google;
 #include "rocksdb_data_store_factory.h"
 #elif defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
 #include "eloq_store_data_store_factory.h"
+#elif defined(DATA_STORE_TYPE_ELOQDSS_TIKV)
+#include "tikv_data_store_factory.h"
 #endif
 
 #include "data_store_service.h"
@@ -337,6 +339,11 @@ int main(int argc, char *argv[])
 
     auto ds_factory = std::make_unique<EloqDS::EloqStoreDataStoreFactory>(
         std::move(eloq_store_config));
+
+#elif defined(DATA_STORE_TYPE_ELOQDSS_TIKV)
+    EloqDS::TikvConfig tikv_config(config_reader);
+    auto ds_factory =
+        std::make_unique<EloqDS::TikvDataStoreFactory>(tikv_config);
 
 #else
     assert(false);

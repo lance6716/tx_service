@@ -35,6 +35,7 @@ enum class DataStoreFactoryType
     ROCKSDB_FACTORY = 0,
     ROCKSDB_CLOUD_FACTORY = 2,
     ELOQSTORE_FACTORY = 3,
+    TIKV_FACTORY = 4,
 };
 
 class DataStoreFactory
