@@ -444,3 +444,20 @@ set_target_properties(dss_server PROPERTIES
 
 install(TARGETS dss_server
         RUNTIME DESTINATION bin)
+
+option(RUN_ELOQ_DSS_TESTS "Run Eloq data store service unit tests" OFF)
+if(RUN_ELOQ_DSS_TESTS)
+    enable_testing()
+    find_package(GTest REQUIRED)
+
+    add_executable(tikv_value_codec_test
+        tests/tikv_value_codec_test.cpp
+    )
+    target_include_directories(tikv_value_codec_test PRIVATE
+        ${PROJECT_SOURCE_DIR}
+    )
+    target_link_libraries(tikv_value_codec_test PRIVATE
+        GTest::gtest_main
+    )
+    add_test(NAME tikv_value_codec_test COMMAND tikv_value_codec_test)
+endif()

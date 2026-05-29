@@ -1244,16 +1244,7 @@ bool RocksDBDataStoreCommon::DeserializeKey(const char *data,
 
 void RocksDBDataStoreCommon::EncodeHasTTLIntoTs(uint64_t &ts, bool has_ttl)
 {
-    // Set the MSB to indicate that the timestamp is encoded
-    if (has_ttl)
-    {
-        ts |= MSB;
-    }
-    else
-    {
-        // ts remains unchanged, since its MSB is always be 0
-        // ts &= MSB_MASK;  // Clear the MSB
-    }
+    ts = EloqValueCodec::EncodeHasTTLIntoTs(ts, has_ttl);
 }
 
 uint16_t RocksDBDataStoreCommon::TransformRecordToValueSlices(
@@ -1289,16 +1280,9 @@ uint16_t RocksDBDataStoreCommon::TransformRecordToValueSlices(
 
 void RocksDBDataStoreCommon::DecodeHasTTLFromTs(uint64_t &ts, bool &has_ttl)
 {
-    // Check if the MSB is set
-    if (ts & MSB)
-    {
-        has_ttl = true;
-        ts &= MSB_MASK;  // Clear the MSB
-    }
-    else
-    {
-        has_ttl = false;
-    }
+    auto decoded = EloqValueCodec::DecodeHasTTLFromTs(ts);
+    ts = decoded.first;
+    has_ttl = decoded.second;
 }
 
 void RocksDBDataStoreCommon::DeserializeValueToRecord(const char *data,
@@ -1307,24 +1291,10 @@ void RocksDBDataStoreCommon::DeserializeValueToRecord(const char *data,
                                                       uint64_t &ts,
                                                       uint64_t &ttl)
 {
-    assert(size >= sizeof(uint64_t));
-    size_t offset = 0;
-    ts = *reinterpret_cast<const uint64_t *>(data);
-    offset += sizeof(uint64_t);
-    bool has_ttl = false;
-    DecodeHasTTLFromTs(ts, has_ttl);
-    if (has_ttl)
-    {
-        assert(size >= sizeof(uint64_t) * 2);
-        ttl = *(reinterpret_cast<const uint64_t *>(data + offset));
-        offset += sizeof(uint64_t);
-    }
-    else
-    {
-        assert(size >= sizeof(uint64_t));
-        ttl = 0;
-    }
-    record.assign(data + offset, size - offset);
+    auto decoded = EloqValueCodec::DecodeValue(std::string_view(data, size));
+    record = std::move(decoded.record);
+    ts = decoded.ts;
+    ttl = decoded.ttl;
 }
 
 rocksdb::InfoLogLevel RocksDBDataStoreCommon::StringToInfoLogLevel(

@@ -34,6 +34,7 @@
 
 #include "data_store.h"
 #include "data_store_service.h"
+#include "eloq_value_codec.h"
 #include "rocksdb_config.h"
 
 namespace EloqDS
@@ -42,9 +43,10 @@ namespace EloqDS
 // Key separator for building key in RocksDB
 static constexpr char KEY_SEPARATOR[] = "/";
 
-// Use most significant bit (MSB) of version_ts to indicate if the ttl is set
-constexpr uint64_t MSB = 1ULL << 63;  // Mask for Bit 63
-constexpr uint64_t MSB_MASK = ~MSB;   // Mask to clear Bit 63
+// Compatibility aliases for existing RocksDB code paths. New code should
+// include eloq_value_codec.h and use EloqValueCodec helpers directly.
+constexpr uint64_t MSB = EloqValueCodec::kTTLFlagMask;
+constexpr uint64_t MSB_MASK = EloqValueCodec::kTimestampMask;
 
 class TTLCompactionFilter : public rocksdb::CompactionFilter
 {
