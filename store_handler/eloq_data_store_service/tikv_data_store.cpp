@@ -748,6 +748,75 @@ void TikvDataStore::ScanClose(ScanRequest *scan_req)
     scan_req->SetFinish(remote::DataStoreError::NO_ERROR);
 }
 
+ExpiredTtlCandidateScanBatch TikvDataStore::ScanExpiredBaseTtlCandidates(
+    std::string_view table_name,
+    int32_t partition_id,
+    std::string_view cursor,
+    uint32_t max_scan_items,
+    uint32_t max_candidates,
+    uint64_t now_ms)
+{
+    ExpiredTtlCandidateScanBatch batch;
+    if (!IsBaseTableForExpiredTtlCleanup(table_name) ||
+        max_scan_items == 0 || max_candidates == 0)
+    {
+        return batch;
+    }
+
+    if (!kv_client_.IsInitialized())
+    {
+        batch.ok = false;
+        batch.range_finished = false;
+        batch.error_message = "TiKV data store is not started.";
+        return batch;
+    }
+
+    const std::string physical_prefix =
+        BuildExpiredTtlPartitionPrefix(table_name, partition_id);
+    const std::string prefix_upper =
+        PrefixUpperBoundForExpiredTtlCleanup(physical_prefix);
+    if (prefix_upper.empty())
+    {
+        batch.ok = false;
+        batch.range_finished = false;
+        batch.error_message =
+            "Unable to build TiKV expired TTL scan upper bound.";
+        return batch;
+    }
+
+    try
+    {
+        KvScanOptions options;
+        options.start_key =
+            NormalizeExpiredTtlScanCursor(physical_prefix, cursor);
+        options.end_key = prefix_upper;
+        options.limit = max_scan_items;
+
+        KvScanResult scan_result = kv_client_.Scan(options);
+        std::vector<ExpiredTtlScanItem> items;
+        items.reserve(scan_result.items.size());
+        for (KvScanItem &item : scan_result.items)
+        {
+            items.push_back(
+                ExpiredTtlScanItem{std::move(item.key), std::move(item.value)});
+        }
+
+        return CollectExpiredTtlCandidatesFromScan(physical_prefix,
+                                                   items,
+                                                   scan_result.has_more,
+                                                   scan_result.next_cursor,
+                                                   now_ms,
+                                                   max_candidates);
+    }
+    catch (const std::exception &e)
+    {
+        batch.ok = false;
+        batch.range_finished = false;
+        batch.error_message = e.what();
+        return batch;
+    }
+}
+
 void TikvDataStore::CreateSnapshotForBackup(
     CreateSnapshotForBackupRequest *req)
 {

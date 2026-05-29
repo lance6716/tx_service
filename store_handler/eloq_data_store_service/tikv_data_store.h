@@ -28,6 +28,7 @@
 
 #include "data_store.h"
 #include "tikv_config.h"
+#include "tikv_expired_ttl_cleanup.h"
 #include "tikv_kv_client.h"
 
 namespace EloqDS
@@ -69,6 +70,14 @@ public:
     void SwitchToReadOnly() override;
 
     void SwitchToReadWrite() override;
+
+    ExpiredTtlCandidateScanBatch ScanExpiredBaseTtlCandidates(
+        std::string_view table_name,
+        int32_t partition_id,
+        std::string_view cursor,
+        uint32_t max_scan_items,
+        uint32_t max_candidates,
+        uint64_t now_ms);
 
 private:
     static std::string BuildKeyPrefix(std::string_view table_name,
