@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -100,12 +101,83 @@ std::string EncodeArchiveValue(bool is_deleted, std::string_view payload)
     return value;
 }
 
+uint32_t HashArchivePartition(std::string_view kv_table_name,
+                              std::string_view logical_key)
+{
+    const size_t table_hash = std::hash<std::string_view>()(kv_table_name);
+    const size_t key_hash = std::hash<std::string_view>()(logical_key);
+    return static_cast<uint32_t>((table_hash ^ (key_hash << 1)) & 0x3ff);
+}
+
+std::string SerializeEloqDocRecord(bool is_deleted, std::string_view payload)
+{
+    std::string value;
+    value.append(reinterpret_cast<const char *>(&is_deleted),
+                 sizeof(is_deleted));
+    if (is_deleted)
+    {
+        return value;
+    }
+
+    // Match DataStoreServiceClient::SerializeTxRecord for EloqDoc records with
+    // empty unpack info and the BSON/encoded blob as payload:
+    // [is_deleted][unpack_info_size][unpack_info][encoded_blob_size][blob].
+    const size_t unpack_info_size = 0;
+    value.append(reinterpret_cast<const char *>(&unpack_info_size),
+                 sizeof(unpack_info_size));
+    const size_t encoded_blob_size = payload.size();
+    value.append(reinterpret_cast<const char *>(&encoded_blob_size),
+                 sizeof(encoded_blob_size));
+    value.append(payload.data(), payload.size());
+    return value;
+}
+
+struct DecodedEloqDocRecord
+{
+    bool is_deleted{false};
+    std::string payload;
+};
+
+DecodedEloqDocRecord DecodeEloqDocRecord(std::string_view value)
+{
+    EXPECT_GE(value.size(), sizeof(bool));
+    DecodedEloqDocRecord decoded;
+    size_t offset = 0;
+    decoded.is_deleted = *reinterpret_cast<const bool *>(value.data() + offset);
+    offset += sizeof(bool);
+    if (decoded.is_deleted)
+    {
+        return decoded;
+    }
+
+    EXPECT_GE(value.size(), offset + sizeof(size_t));
+    const size_t unpack_info_size =
+        *reinterpret_cast<const size_t *>(value.data() + offset);
+    offset += sizeof(size_t) + unpack_info_size;
+
+    EXPECT_GE(value.size(), offset + sizeof(size_t));
+    const size_t encoded_blob_size =
+        *reinterpret_cast<const size_t *>(value.data() + offset);
+    offset += sizeof(size_t);
+    EXPECT_GE(value.size(), offset + encoded_blob_size);
+    decoded.payload.assign(value.data() + offset, encoded_blob_size);
+    return decoded;
+}
+
 std::string RecordWithType(char type, std::string_view payload)
 {
     std::string record(1, type);
     record.append(payload.data(), payload.size());
     return record;
 }
+
+struct SnapshotLookupResult
+{
+    bool found{false};
+    bool is_deleted{false};
+    std::string payload;
+    uint64_t commit_ts{0};
+};
 
 class TestWriteRequest : public WriteRecordsRequest
 {
@@ -430,6 +502,149 @@ protected:
         }
     }
 
+    SnapshotLookupResult SnapshotRecordAt(std::string_view base_table,
+                                          int32_t base_partition,
+                                          std::string_view key,
+                                          uint64_t snapshot_ts)
+    {
+        TestReadRequest base_read(std::string(base_table),
+                                  base_partition,
+                                  std::string(key));
+        store_->Read(&base_read);
+        if (base_read.error_ == DataStoreError::NO_ERROR &&
+            base_read.ts_ <= snapshot_ts)
+        {
+            DecodedEloqDocRecord decoded =
+                DecodeEloqDocRecord(base_read.record_);
+            return SnapshotLookupResult{!decoded.is_deleted,
+                                        decoded.is_deleted,
+                                        std::move(decoded.payload),
+                                        base_read.ts_};
+        }
+        if (base_read.error_ != DataStoreError::NO_ERROR &&
+            base_read.error_ != DataStoreError::KEY_NOT_FOUND)
+        {
+            ADD_FAILURE() << "unexpected base read error: "
+                          << static_cast<int>(base_read.error_);
+            return {};
+        }
+
+        return FetchVisibleArchive(base_table, key, snapshot_ts);
+    }
+
+    std::map<std::string, SnapshotLookupResult> SnapshotScan(
+        std::string_view base_table,
+        int32_t base_partition,
+        uint64_t snapshot_ts)
+    {
+        std::map<std::string, SnapshotLookupResult> visible;
+        std::string session_id;
+        do
+        {
+            TestScanRequest req(std::string(base_table),
+                                base_partition,
+                                "",
+                                "",
+                                true,
+                                false,
+                                true,
+                                2,
+                                session_id);
+            store_->ScanNext(&req);
+            EXPECT_EQ(req.error_, DataStoreError::NO_ERROR)
+                << req.error_message_;
+            if (req.error_ != DataStoreError::NO_ERROR)
+            {
+                return visible;
+            }
+
+            for (const auto &item : req.items_)
+            {
+                SnapshotLookupResult result;
+                if (item.ts <= snapshot_ts)
+                {
+                    DecodedEloqDocRecord decoded =
+                        DecodeEloqDocRecord(item.value);
+                    result = SnapshotLookupResult{!decoded.is_deleted,
+                                                  decoded.is_deleted,
+                                                  std::move(decoded.payload),
+                                                  item.ts};
+                }
+                else
+                {
+                    result = FetchVisibleArchive(base_table,
+                                                 item.key,
+                                                 snapshot_ts);
+                }
+
+                if (result.found && !result.is_deleted)
+                {
+                    visible.emplace(item.key, std::move(result));
+                }
+            }
+            session_id = req.session_id_;
+        } while (!session_id.empty());
+
+        return visible;
+    }
+
+    SnapshotLookupResult FetchVisibleArchive(std::string_view kv_table_name,
+                                             std::string_view logical_key,
+                                             uint64_t upper_bound_ts)
+    {
+        const uint32_t archive_partition =
+            HashArchivePartition(kv_table_name, logical_key);
+        TestScanRequest req("mvcc_archives",
+                            static_cast<int32_t>(archive_partition),
+                            EncodeArchiveKey(kv_table_name,
+                                             logical_key,
+                                             upper_bound_ts),
+                            EncodeArchiveKey(kv_table_name, logical_key, 0),
+                            true,
+                            false,
+                            false,
+                            1);
+        store_->ScanNext(&req);
+        EXPECT_EQ(req.error_, DataStoreError::NO_ERROR) << req.error_message_;
+        if (req.error_ != DataStoreError::NO_ERROR || req.items_.empty())
+        {
+            return {};
+        }
+
+        DecodedEloqDocRecord decoded = DecodeEloqDocRecord(req.items_[0].value);
+        return SnapshotLookupResult{!decoded.is_deleted,
+                                    decoded.is_deleted,
+                                    std::move(decoded.payload),
+                                    req.items_[0].ts};
+    }
+
+    void WriteArchive(std::string_view kv_table_name,
+                      std::string_view key,
+                      uint64_t commit_ts,
+                      std::string_view serialized_record)
+    {
+        const uint32_t archive_partition =
+            HashArchivePartition(kv_table_name, key);
+        Write("mvcc_archives",
+              static_cast<int32_t>(archive_partition),
+              {{EncodeArchiveKey(kv_table_name, key, commit_ts),
+                std::string(serialized_record),
+                commit_ts,
+                0,
+                WriteOpType::PUT}});
+    }
+
+    void RestartStore()
+    {
+        ASSERT_NE(store_, nullptr);
+        store_->Shutdown();
+        store_.reset();
+
+        store_ = std::make_unique<TikvDataStore>(config_, 0, nullptr);
+        ASSERT_TRUE(store_->Initialize());
+        ASSERT_TRUE(store_->StartDB(2));
+    }
+
     TikvConfig config_;
     std::unique_ptr<TikvDataStore> store_;
 };
@@ -602,6 +817,118 @@ TEST_F(TikvBackendSmokeTest, ArchiveReverseScanFindsSnapshotVisibleVersion)
     ASSERT_EQ(static_cast<DataStoreError>(drop.result_.error_code()),
               DataStoreError::NO_ERROR)
         << drop.result_.error_msg();
+}
+
+TEST_F(TikvBackendSmokeTest,
+       TxServiceSnapshotReadSurvivesFlushAndStoreRestart)
+{
+    const std::string table = "eloqdoc_snapshot_read";
+    const int32_t partition = 11;
+    const std::string key = "doc-a";
+
+    Write(table,
+          partition,
+          {{key,
+            SerializeEloqDocRecord(false, "base-v300"),
+            300,
+            0,
+            WriteOpType::PUT}});
+    WriteArchive(table, key, 100, SerializeEloqDocRecord(false, "archive-v100"));
+    WriteArchive(table, key, 200, SerializeEloqDocRecord(false, "archive-v200"));
+
+    TestFlushDataRequest flush({table, "mvcc_archives"});
+    store_->FlushData(&flush);
+    ASSERT_EQ(static_cast<DataStoreError>(flush.result_.error_code()),
+              DataStoreError::NO_ERROR)
+        << flush.result_.error_msg();
+
+    RestartStore();
+
+    SnapshotLookupResult old = SnapshotRecordAt(table, partition, key, 250);
+    ASSERT_TRUE(old.found);
+    EXPECT_FALSE(old.is_deleted);
+    EXPECT_EQ(old.commit_ts, 200U);
+    EXPECT_EQ(old.payload, "archive-v200");
+
+    SnapshotLookupResult missing_before_first_archive =
+        SnapshotRecordAt(table, partition, key, 50);
+    EXPECT_FALSE(missing_before_first_archive.found);
+
+    SnapshotLookupResult latest = SnapshotRecordAt(table, partition, key, 350);
+    ASSERT_TRUE(latest.found);
+    EXPECT_FALSE(latest.is_deleted);
+    EXPECT_EQ(latest.commit_ts, 300U);
+    EXPECT_EQ(latest.payload, "base-v300");
+
+    TestDropTableRequest drop_base(table);
+    store_->DropTable(&drop_base);
+    ASSERT_EQ(static_cast<DataStoreError>(drop_base.result_.error_code()),
+              DataStoreError::NO_ERROR)
+        << drop_base.result_.error_msg();
+
+    TestDropTableRequest drop_archives("mvcc_archives");
+    store_->DropTable(&drop_archives);
+    ASSERT_EQ(static_cast<DataStoreError>(drop_archives.result_.error_code()),
+              DataStoreError::NO_ERROR)
+        << drop_archives.result_.error_msg();
+}
+
+TEST_F(TikvBackendSmokeTest,
+       TxServiceSnapshotScanKeepsReadTimestampAcrossUpdates)
+{
+    const std::string table = "eloqdoc_snapshot_scan";
+    const int32_t partition = 12;
+
+    // Persist the post-T2 base state, plus the archive rows that TxService
+    // writes during checkpoint for the pre-T2 versions. A snapshot scan at
+    // read_ts=150 must still see the old versions of a/b, the unchanged c, and
+    // must not see d because it was inserted after the snapshot timestamp.
+    Write(table,
+          partition,
+          {{"a", SerializeEloqDocRecord(false, "a-v200"), 200, 0, WriteOpType::PUT},
+           {"b", SerializeEloqDocRecord(false, "b-v210"), 210, 0, WriteOpType::PUT},
+           {"c", SerializeEloqDocRecord(false, "c-v120"), 120, 0, WriteOpType::PUT},
+           {"d", SerializeEloqDocRecord(false, "d-v220"), 220, 0, WriteOpType::PUT}});
+    WriteArchive(table, "a", 100, SerializeEloqDocRecord(false, "a-v100"));
+    WriteArchive(table, "b", 110, SerializeEloqDocRecord(false, "b-v110"));
+
+    std::map<std::string, SnapshotLookupResult> at_150 =
+        SnapshotScan(table, partition, 150);
+    ASSERT_EQ(at_150.size(), 3U);
+    ASSERT_TRUE(at_150.find("a") != at_150.end());
+    ASSERT_TRUE(at_150.find("b") != at_150.end());
+    ASSERT_TRUE(at_150.find("c") != at_150.end());
+    EXPECT_TRUE(at_150.find("d") == at_150.end());
+    EXPECT_EQ(at_150.at("a").commit_ts, 100U);
+    EXPECT_EQ(at_150.at("a").payload, "a-v100");
+    EXPECT_EQ(at_150.at("b").commit_ts, 110U);
+    EXPECT_EQ(at_150.at("b").payload, "b-v110");
+    EXPECT_EQ(at_150.at("c").commit_ts, 120U);
+    EXPECT_EQ(at_150.at("c").payload, "c-v120");
+
+    std::map<std::string, SnapshotLookupResult> at_250 =
+        SnapshotScan(table, partition, 250);
+    ASSERT_EQ(at_250.size(), 4U);
+    EXPECT_EQ(at_250.at("a").commit_ts, 200U);
+    EXPECT_EQ(at_250.at("a").payload, "a-v200");
+    EXPECT_EQ(at_250.at("b").commit_ts, 210U);
+    EXPECT_EQ(at_250.at("b").payload, "b-v210");
+    EXPECT_EQ(at_250.at("c").commit_ts, 120U);
+    EXPECT_EQ(at_250.at("c").payload, "c-v120");
+    EXPECT_EQ(at_250.at("d").commit_ts, 220U);
+    EXPECT_EQ(at_250.at("d").payload, "d-v220");
+
+    TestDropTableRequest drop_base(table);
+    store_->DropTable(&drop_base);
+    ASSERT_EQ(static_cast<DataStoreError>(drop_base.result_.error_code()),
+              DataStoreError::NO_ERROR)
+        << drop_base.result_.error_msg();
+
+    TestDropTableRequest drop_archives("mvcc_archives");
+    store_->DropTable(&drop_archives);
+    ASSERT_EQ(static_cast<DataStoreError>(drop_archives.result_.error_code()),
+              DataStoreError::NO_ERROR)
+        << drop_archives.result_.error_msg();
 }
 
 }  // namespace
