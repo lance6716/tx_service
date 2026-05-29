@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "INIReader.h"
+#include "tikv_archive_cleanup_watermark.h"
 
 namespace EloqDS
 {
@@ -41,10 +42,23 @@ struct TikvConfig
 
     static std::vector<std::string> SplitEndpoints(std::string_view endpoints);
 
+    ArchiveCleanupWatermark ComputeArchiveCleanupWatermark(
+        uint64_t tx_service_oldest_snapshot_ts,
+        uint64_t current_eloq_ts) const
+    {
+        return ComputeSafeArchiveCleanupWatermark(
+            tx_service_oldest_snapshot_ts,
+            current_eloq_ts,
+            archive_cleanup_retention_window_us_);
+    }
+
     std::vector<std::string> pd_endpoints_{"127.0.0.1:2379"};
     std::string key_prefix_;
     uint32_t request_timeout_seconds_{5};
     uint32_t scan_batch_size_{256};
+    // Fallback for future archive/tombstone cleanup. 0 means cleanup stays
+    // disabled unless TxService provides a safe archive cleanup watermark.
+    uint64_t archive_cleanup_retention_window_us_{0};
     pingcap::ClusterConfig cluster_config_;
 };
 

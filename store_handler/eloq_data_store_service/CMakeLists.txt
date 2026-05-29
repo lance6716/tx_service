@@ -484,6 +484,18 @@ if(RUN_ELOQ_DSS_TESTS)
     )
     add_test(NAME tikv_value_codec_test COMMAND tikv_value_codec_test)
 
+    add_executable(tikv_archive_cleanup_watermark_test
+        tests/tikv_archive_cleanup_watermark_test.cpp
+    )
+    target_include_directories(tikv_archive_cleanup_watermark_test PRIVATE
+        ${PROJECT_SOURCE_DIR}
+    )
+    target_link_libraries(tikv_archive_cleanup_watermark_test PRIVATE
+        GTest::gtest_main
+    )
+    add_test(NAME tikv_archive_cleanup_watermark_test
+        COMMAND tikv_archive_cleanup_watermark_test)
+
     if(WITH_DATA_STORE STREQUAL "ELOQDSS_TIKV")
         add_executable(tikv_backend_smoke_test
             tests/tikv_backend_smoke_test.cpp

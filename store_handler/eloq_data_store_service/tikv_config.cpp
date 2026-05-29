@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <limits>
 #include <utility>
 
 DEFINE_string(tikv_pd_endpoints,
@@ -38,6 +39,11 @@ DEFINE_uint32(tikv_request_timeout_seconds,
               5,
               "TiKV request timeout in seconds");
 DEFINE_uint32(tikv_scan_batch_size, 256, "TiKV scan/delete-range batch size");
+DEFINE_uint64(tikv_archive_cleanup_retention_seconds,
+              0,
+              "Conservative fallback retention window for TiKV logical "
+              "archive/tombstone cleanup. 0 keeps cleanup disabled unless "
+              "TxService provides a safe archive cleanup watermark.");
 
 namespace EloqDS
 {
@@ -67,6 +73,22 @@ bool IsFlagDefault(const char *flag_name)
 uint32_t PositiveUInt32OrDefault(long value, uint32_t default_value)
 {
     return value > 0 ? static_cast<uint32_t>(value) : default_value;
+}
+
+uint64_t NonNegativeUInt64OrDefault(long value, uint64_t default_value)
+{
+    return value >= 0 ? static_cast<uint64_t>(value) : default_value;
+}
+
+uint64_t SecondsToMicros(uint64_t seconds)
+{
+    constexpr uint64_t kMicrosPerSecond = 1000000;
+    if (seconds >
+        std::numeric_limits<uint64_t>::max() / kMicrosPerSecond)
+    {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    return seconds * kMicrosPerSecond;
 }
 
 }  // namespace
@@ -120,6 +142,15 @@ TikvConfig::TikvConfig(const INIReader &config_reader)
             ? static_cast<long>(FLAGS_tikv_scan_batch_size)
             : config_reader.GetInteger("store", "tikv_scan_batch_size", 256),
         256);
+    archive_cleanup_retention_window_us_ = SecondsToMicros(
+        !IsFlagDefault("tikv_archive_cleanup_retention_seconds")
+            ? FLAGS_tikv_archive_cleanup_retention_seconds
+            : NonNegativeUInt64OrDefault(
+                  config_reader.GetInteger(
+                      "store",
+                      "tikv_archive_cleanup_retention_seconds",
+                      0),
+                  0));
 }
 
 }  // namespace EloqDS
