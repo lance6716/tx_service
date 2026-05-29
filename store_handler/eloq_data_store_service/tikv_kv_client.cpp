@@ -34,6 +34,8 @@
 #include <stdexcept>
 #include <utility>
 
+#include "tx_service_metrics.h"
+
 namespace EloqDS
 {
 namespace
@@ -56,6 +58,41 @@ void SetGetRequestContext(kvrpcpb::GetRequest &request,
         context->add_resolved_locks(ts);
     }
 }
+
+bool KvMetricsEnabled()
+{
+    return metrics::enable_kv_metrics && metrics::kv_meter != nullptr;
+}
+
+class KvMetricScope
+{
+public:
+    KvMetricScope(const metrics::Name &total_metric,
+                  const metrics::Name &duration_metric)
+        : total_metric_(total_metric),
+          duration_metric_(duration_metric),
+          enabled_(KvMetricsEnabled()),
+          start_(enabled_ ? metrics::Clock::now() : metrics::TimePoint{})
+    {
+    }
+
+    ~KvMetricScope()
+    {
+        if (!enabled_)
+        {
+            return;
+        }
+
+        metrics::kv_meter->CollectDuration(duration_metric_, start_);
+        metrics::kv_meter->Collect(total_metric_, 1);
+    }
+
+private:
+    const metrics::Name &total_metric_;
+    const metrics::Name &duration_metric_;
+    bool enabled_{false};
+    metrics::TimePoint start_;
+};
 
 }  // namespace
 
@@ -111,6 +148,8 @@ KvGetResult TikvKvClient::Get(const std::string &key)
 {
     EnsureInitialized();
     ClearLastError();
+    KvMetricScope metrics_scope(metrics::NAME_KV_READ_TOTAL,
+                                metrics::NAME_KV_READ_DURATION);
 
     try
     {
@@ -196,6 +235,8 @@ bool TikvKvClient::CommitBatch(const std::vector<KvMutation> &mutations)
     {
         return true;
     }
+    KvMetricScope metrics_scope(metrics::NAME_KV_WRITE_TOTAL,
+                                metrics::NAME_KV_WRITE_DURATION);
 
     try
     {
@@ -228,6 +269,8 @@ KvScanResult TikvKvClient::Scan(const KvScanOptions &options)
 {
     EnsureInitialized();
     ClearLastError();
+    KvMetricScope metrics_scope(metrics::NAME_KV_SCAN_TOTAL,
+                                metrics::NAME_KV_SCAN_DURATION);
 
     try
     {
@@ -271,6 +314,8 @@ bool TikvKvClient::DeleteRange(const std::string &start_key,
     const std::string end =
         end_key.empty() ? PrefixUpperBound() : EncodeKey(end_key);
     const uint32_t batch_size = EffectiveScanLimit(0);
+    KvMetricScope metrics_scope(metrics::NAME_KV_RANGE_DELETE_TOTAL,
+                                metrics::NAME_KV_RANGE_DELETE_DURATION);
 
     try
     {

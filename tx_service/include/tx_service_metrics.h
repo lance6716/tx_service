@@ -35,6 +35,14 @@ inline const metrics::Name NAME_KV_LOAD_SLICE_DURATION{
     "kv_load_slice_duration"};
 inline const metrics::Name NAME_KV_READ_TOTAL{"kv_read_total"};
 inline const metrics::Name NAME_KV_READ_DURATION{"kv_read_duration"};
+inline const metrics::Name NAME_KV_WRITE_TOTAL{"kv_write_total"};
+inline const metrics::Name NAME_KV_WRITE_DURATION{"kv_write_duration"};
+inline const metrics::Name NAME_KV_SCAN_TOTAL{"kv_scan_total"};
+inline const metrics::Name NAME_KV_SCAN_DURATION{"kv_scan_duration"};
+inline const metrics::Name NAME_KV_RANGE_DELETE_TOTAL{
+    "kv_range_delete_total"};
+inline const metrics::Name NAME_KV_RANGE_DELETE_DURATION{
+    "kv_range_delete_duration"};
 
 inline const metrics::Name NAME_MEMORY_LIMIT{"memory_limit"};
 inline const metrics::Name NAME_CACHE_HIT_OR_MISS_TOTAL{

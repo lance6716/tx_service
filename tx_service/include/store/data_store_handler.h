@@ -376,6 +376,19 @@ public:
                                         metrics::Type::Counter);
             metrics::kv_meter->Register(metrics::NAME_KV_READ_DURATION,
                                         metrics::Type::Histogram);
+            metrics::kv_meter->Register(metrics::NAME_KV_WRITE_TOTAL,
+                                        metrics::Type::Counter);
+            metrics::kv_meter->Register(metrics::NAME_KV_WRITE_DURATION,
+                                        metrics::Type::Histogram);
+            metrics::kv_meter->Register(metrics::NAME_KV_SCAN_TOTAL,
+                                        metrics::Type::Counter);
+            metrics::kv_meter->Register(metrics::NAME_KV_SCAN_DURATION,
+                                        metrics::Type::Histogram);
+            metrics::kv_meter->Register(metrics::NAME_KV_RANGE_DELETE_TOTAL,
+                                        metrics::Type::Counter);
+            metrics::kv_meter->Register(
+                metrics::NAME_KV_RANGE_DELETE_DURATION,
+                metrics::Type::Histogram);
         }
     };
 
