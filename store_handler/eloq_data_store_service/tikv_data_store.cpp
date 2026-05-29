@@ -209,6 +209,15 @@ bool MatchesSearchConditions(std::string_view record, const ScanRequest *req)
     return true;
 }
 
+std::string BuildTablePrefix(std::string_view table_name)
+{
+    std::string prefix;
+    prefix.reserve(table_name.size() + kKeySeparator.size());
+    prefix.append(table_name.data(), table_name.size());
+    prefix.append(kKeySeparator.data(), kKeySeparator.size());
+    return prefix;
+}
+
 }  // namespace
 
 TikvDataStore::TikvDataStore(const TikvConfig &config,
@@ -421,9 +430,62 @@ void TikvDataStore::DeleteRange(DeleteRangeRequest *delete_range_req)
         return;
     }
 
-    delete_range_req->SetFinish(MakeCommonResult(
-        remote::DataStoreError::WRITE_FAILED,
-        "TiKV DeleteRange is not implemented yet."));
+    remote::CommonResult shard_status_result =
+        ShardWriteStatusResult(data_store_service_, shard_id_);
+    if (shard_status_result.error_code() != remote::DataStoreError::NO_ERROR)
+    {
+        delete_range_req->SetFinish(shard_status_result);
+        return;
+    }
+
+    const std::string physical_start_key =
+        BuildKey(delete_range_req->GetTableName(),
+                 delete_range_req->GetPartitionId(),
+                 delete_range_req->GetStartKey());
+
+    std::string physical_end_key;
+    if (delete_range_req->GetEndKey().empty())
+    {
+        // An empty logical end means "to the end of this table partition", not
+        // "to the end of the configured TiKV key prefix". Always pass an
+        // explicit partition upper bound to TikvKvClient::DeleteRange().
+        physical_end_key = PrefixUpperBound(
+            BuildKeyPrefix(delete_range_req->GetTableName(),
+                           delete_range_req->GetPartitionId()));
+    }
+    else
+    {
+        physical_end_key = BuildKey(delete_range_req->GetTableName(),
+                                    delete_range_req->GetPartitionId(),
+                                    delete_range_req->GetEndKey());
+    }
+
+    if (physical_end_key.empty())
+    {
+        delete_range_req->SetFinish(MakeCommonResult(
+            remote::DataStoreError::WRITE_FAILED,
+            "Unable to build TiKV DeleteRange upper bound."));
+        return;
+    }
+
+    if (physical_start_key >= physical_end_key)
+    {
+        delete_range_req->SetFinish(
+            MakeCommonResult(remote::DataStoreError::NO_ERROR));
+        return;
+    }
+
+    // SkipWal is a RocksDB-only optimization. TiKV deletes are durable once the
+    // underlying transaction commits.
+    if (!kv_client_.DeleteRange(physical_start_key, physical_end_key))
+    {
+        delete_range_req->SetFinish(MakeCommonResult(
+            remote::DataStoreError::WRITE_FAILED, kv_client_.LastError()));
+        return;
+    }
+
+    delete_range_req->SetFinish(
+        MakeCommonResult(remote::DataStoreError::NO_ERROR));
 }
 
 void TikvDataStore::CreateTable(CreateTableRequest *create_table_req)
@@ -452,9 +514,36 @@ void TikvDataStore::DropTable(DropTableRequest *drop_table_req)
         return;
     }
 
-    drop_table_req->SetFinish(MakeCommonResult(
-        remote::DataStoreError::WRITE_FAILED,
-        "TiKV DropTable is not implemented yet."));
+    remote::CommonResult shard_status_result =
+        ShardWriteStatusResult(data_store_service_, shard_id_);
+    if (shard_status_result.error_code() != remote::DataStoreError::NO_ERROR)
+    {
+        drop_table_req->SetFinish(shard_status_result);
+        return;
+    }
+
+    const std::string table_prefix =
+        BuildTablePrefix(drop_table_req->GetTableName());
+    const std::string table_prefix_upper = PrefixUpperBound(table_prefix);
+    if (table_prefix_upper.empty())
+    {
+        drop_table_req->SetFinish(MakeCommonResult(
+            remote::DataStoreError::WRITE_FAILED,
+            "Unable to build TiKV DropTable upper bound."));
+        return;
+    }
+
+    if (!kv_client_.DeleteRange(table_prefix, table_prefix_upper))
+    {
+        drop_table_req->SetFinish(MakeCommonResult(
+            remote::DataStoreError::WRITE_FAILED, kv_client_.LastError()));
+        return;
+    }
+
+    // TiKV commits are durable; no RocksDB-style Flush() is required after the
+    // range cleanup.
+    drop_table_req->SetFinish(
+        MakeCommonResult(remote::DataStoreError::NO_ERROR));
 }
 
 void TikvDataStore::ScanNext(ScanRequest *scan_req)
@@ -653,12 +742,8 @@ void TikvDataStore::ScanClose(ScanRequest *scan_req)
 {
     PoolableGuard req_guard(scan_req);
 
-    const std::string &session_id = scan_req->GetSessionId();
-    if (!session_id.empty() && data_store_service_ != nullptr)
-    {
-        data_store_service_->EraseScanIter(shard_id_, session_id);
-    }
-
+    // TiKV scans are stateless. ScanNext returns the next physical cursor in
+    // the response session id; there is no server-side iterator to release.
     scan_req->ClearSessionId();
     scan_req->SetFinish(remote::DataStoreError::NO_ERROR);
 }
@@ -669,7 +754,7 @@ void TikvDataStore::CreateSnapshotForBackup(
     PoolableGuard req_guard(req);
     req->SetFinish(
         remote::DataStoreError::CREATE_SNAPSHOT_ERROR,
-        "TiKV backend does not support RocksDB snapshot backup files.");
+        "TiKV backend does not support DataStore snapshot backup files.");
 }
 
 void TikvDataStore::SwitchToReadOnly()
