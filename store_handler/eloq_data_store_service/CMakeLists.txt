@@ -483,4 +483,23 @@ if(RUN_ELOQ_DSS_TESTS)
         GTest::gtest_main
     )
     add_test(NAME tikv_value_codec_test COMMAND tikv_value_codec_test)
+
+    if(WITH_DATA_STORE STREQUAL "ELOQDSS_TIKV")
+        add_executable(tikv_backend_smoke_test
+            tests/tikv_backend_smoke_test.cpp
+            tikv_data_store.cpp
+            tikv_kv_client.cpp
+            ds_request.pb.cc
+        )
+        target_include_directories(tikv_backend_smoke_test PRIVATE
+            ${PROJECT_SOURCE_DIR}
+        )
+        target_link_libraries(tikv_backend_smoke_test PRIVATE
+            kv_client
+            ${PROTOBUF_LIBRARIES}
+            ${DYNAMIC_LIB}
+            GTest::gtest_main
+        )
+        add_test(NAME tikv_backend_smoke_test COMMAND tikv_backend_smoke_test)
+    endif()
 endif()
