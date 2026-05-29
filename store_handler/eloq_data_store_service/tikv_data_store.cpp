@@ -24,6 +24,7 @@
 
 #include <glog/logging.h>
 
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <exception>
@@ -90,6 +91,33 @@ remote::CommonResult ShardWriteStatusResult(
                             "KV store not opened yet.");
 }
 
+remote::CommonResult ShardReadStatusResult(DataStoreService *data_store_service,
+                                           uint32_t shard_id)
+{
+    if (data_store_service == nullptr)
+    {
+        return MakeCommonResult(remote::DataStoreError::NO_ERROR);
+    }
+
+    const DSShardStatus shard_status =
+        data_store_service->FetchDSShardStatus(shard_id);
+    if (shard_status == DSShardStatus::ReadWrite ||
+        shard_status == DSShardStatus::ReadOnly)
+    {
+        return MakeCommonResult(remote::DataStoreError::NO_ERROR);
+    }
+
+    if (shard_status == DSShardStatus::Closed)
+    {
+        return MakeCommonResult(
+            remote::DataStoreError::REQUESTED_NODE_NOT_OWNER,
+            "Requested data not on local node.");
+    }
+
+    return MakeCommonResult(remote::DataStoreError::DB_NOT_OPEN,
+                            "KV store not opened yet.");
+}
+
 bool IsExpired(uint64_t ttl)
 {
     if (ttl == 0)
@@ -102,6 +130,83 @@ bool IsExpired(uint64_t ttl)
             std::chrono::system_clock::now().time_since_epoch())
             .count();
     return ttl < now_ms;
+}
+
+std::string KeyAfter(std::string_view key)
+{
+    std::string next(key.data(), key.size());
+    next.push_back('\0');
+    return next;
+}
+
+std::string PrefixUpperBound(std::string_view prefix)
+{
+    std::string bound(prefix.data(), prefix.size());
+    for (auto it = bound.rbegin(); it != bound.rend(); ++it)
+    {
+        auto byte = static_cast<unsigned char>(*it);
+        if (byte != 0xff)
+        {
+            *it = static_cast<char>(byte + 1);
+            bound.erase(it.base(), bound.end());
+            return bound;
+        }
+    }
+    return "";
+}
+
+bool StartsWith(std::string_view value, std::string_view prefix)
+{
+    return value.size() >= prefix.size() &&
+           value.compare(0, prefix.size(), prefix) == 0;
+}
+
+bool StripKeyPrefix(std::string_view physical_key,
+                    std::string_view physical_prefix,
+                    std::string_view &logical_key)
+{
+    if (!StartsWith(physical_key, physical_prefix) ||
+        physical_key.size() <= physical_prefix.size())
+    {
+        return false;
+    }
+
+    logical_key = physical_key.substr(physical_prefix.size());
+    return true;
+}
+
+bool MatchesSearchConditions(std::string_view record, const ScanRequest *req)
+{
+    assert(req != nullptr);
+    if (record.empty())
+    {
+        return true;
+    }
+
+    const int conditions_size = req->GetSearchConditionsSize();
+    for (int cond_idx = 0; cond_idx < conditions_size; ++cond_idx)
+    {
+        const remote::SearchCondition *cond =
+            req->GetSearchConditions(cond_idx);
+        assert(cond != nullptr);
+        if (cond->field_name() == "type")
+        {
+            if (cond->value().empty())
+            {
+                return false;
+            }
+
+            const int8_t obj_type =
+                static_cast<int8_t>(cond->value()[0]);
+            const int8_t store_obj_type = static_cast<int8_t>(record[0]);
+            if (obj_type != store_obj_type)
+            {
+                return false;
+            }
+        }
+    }
+
+    return true;
 }
 
 }  // namespace
@@ -355,6 +460,7 @@ void TikvDataStore::DropTable(DropTableRequest *drop_table_req)
 void TikvDataStore::ScanNext(ScanRequest *scan_req)
 {
     PoolableGuard req_guard(scan_req);
+    const std::string session_id = scan_req->GetSessionId();
     scan_req->ClearSessionId();
 
     if (!kv_client_.IsInitialized())
@@ -364,8 +470,183 @@ void TikvDataStore::ScanNext(ScanRequest *scan_req)
         return;
     }
 
-    scan_req->SetFinish(remote::DataStoreError::READ_FAILED,
-                        "TiKV ScanNext is not implemented yet.");
+    remote::CommonResult shard_status_result =
+        ShardReadStatusResult(data_store_service_, shard_id_);
+    if (shard_status_result.error_code() != remote::DataStoreError::NO_ERROR)
+    {
+        scan_req->SetFinish(static_cast<remote::DataStoreError>(
+                                shard_status_result.error_code()),
+                            shard_status_result.error_msg());
+        return;
+    }
+
+    const uint32_t batch_size = scan_req->BatchSize();
+    if (batch_size == 0)
+    {
+        scan_req->SetFinish(remote::DataStoreError::NO_ERROR);
+        return;
+    }
+
+    const std::string key_prefix =
+        BuildKeyPrefix(scan_req->GetTableName(), scan_req->GetPartitionId());
+    const std::string key_prefix_upper = PrefixUpperBound(key_prefix);
+    const bool scan_forward = scan_req->ScanForward();
+
+    std::string cursor;
+    if (!session_id.empty() && StartsWith(session_id, key_prefix))
+    {
+        // TiKV scans are stateless: the response session id carries the next
+        // physical cursor. Existing callers still pass the last returned
+        // logical key, but the cursor is more precise when filters skipped
+        // keys after the last returned item.
+        cursor = session_id;
+    }
+    else if (!scan_req->GetStartKey().empty())
+    {
+        const std::string start_key =
+            BuildKey(scan_req->GetTableName(),
+                     scan_req->GetPartitionId(),
+                     scan_req->GetStartKey());
+        if (scan_forward)
+        {
+            cursor =
+                scan_req->InclusiveStart() ? start_key : KeyAfter(start_key);
+        }
+        else
+        {
+            cursor =
+                scan_req->InclusiveStart() ? KeyAfter(start_key) : start_key;
+        }
+    }
+    else
+    {
+        cursor = scan_forward ? key_prefix : key_prefix_upper;
+    }
+
+    std::string end_key;
+    if (!scan_req->GetEndKey().empty())
+    {
+        const std::string physical_end_key =
+            BuildKey(scan_req->GetTableName(),
+                     scan_req->GetPartitionId(),
+                     scan_req->GetEndKey());
+        if (scan_forward)
+        {
+            end_key = scan_req->InclusiveEnd()
+                          ? KeyAfter(physical_end_key)
+                          : physical_end_key;
+        }
+        else
+        {
+            end_key = scan_req->InclusiveEnd()
+                          ? physical_end_key
+                          : KeyAfter(physical_end_key);
+        }
+    }
+    else
+    {
+        end_key = scan_forward ? key_prefix_upper : key_prefix;
+    }
+
+    uint32_t record_count = 0;
+    bool scan_completed = false;
+    const bool has_search_conditions =
+        scan_req->GetSearchConditionsSize() > 0;
+
+    try
+    {
+        while (record_count < batch_size && !scan_completed)
+        {
+            KvScanOptions options;
+            options.start_key = cursor;
+            options.end_key = end_key;
+            options.limit = batch_size - record_count;
+            if (has_search_conditions)
+            {
+                options.limit = std::max(options.limit,
+                                         config_.scan_batch_size_);
+            }
+            options.reverse = !scan_forward;
+
+            KvScanResult result = kv_client_.Scan(options);
+            if (result.items.empty())
+            {
+                scan_completed = true;
+                break;
+            }
+
+            bool consumed_all_items = true;
+            for (const KvScanItem &item : result.items)
+            {
+                std::string_view logical_key;
+                if (!StripKeyPrefix(item.key, key_prefix, logical_key))
+                {
+                    scan_completed = true;
+                    consumed_all_items = false;
+                    break;
+                }
+
+                auto decoded = EloqValueCodec::DecodeValue(item.value);
+                if (!MatchesSearchConditions(decoded.record, scan_req))
+                {
+                    cursor =
+                        scan_forward ? KeyAfter(item.key) : item.key;
+                    continue;
+                }
+
+                cursor = scan_forward ? KeyAfter(item.key) : item.key;
+                scan_req->AddItem(std::string(logical_key),
+                                  std::move(decoded.record),
+                                  decoded.ts,
+                                  decoded.ttl);
+                ++record_count;
+                if (record_count == batch_size)
+                {
+                    consumed_all_items = false;
+                    break;
+                }
+            }
+
+            if (record_count == batch_size)
+            {
+                break;
+            }
+
+            if (scan_completed)
+            {
+                break;
+            }
+
+            if (result.has_more)
+            {
+                cursor = consumed_all_items ? result.next_cursor : cursor;
+                if (cursor.empty())
+                {
+                    scan_completed = true;
+                }
+            }
+            else
+            {
+                scan_completed = true;
+            }
+        }
+
+        if (!scan_completed && scan_req->GenerateSessionId() &&
+            !cursor.empty())
+        {
+            scan_req->SetSessionId(cursor);
+        }
+
+        scan_req->SetFinish(remote::DataStoreError::NO_ERROR);
+    }
+    catch (const std::exception &e)
+    {
+        LOG(ERROR) << "TiKV ScanNext failed, table: "
+                   << scan_req->GetTableName()
+                   << ", partition: " << scan_req->GetPartitionId()
+                   << ", error: " << e.what();
+        scan_req->SetFinish(remote::DataStoreError::READ_FAILED, e.what());
+    }
 }
 
 void TikvDataStore::ScanClose(ScanRequest *scan_req)
