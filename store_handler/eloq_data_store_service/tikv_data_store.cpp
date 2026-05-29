@@ -24,10 +24,16 @@
 
 #include <glog/logging.h>
 
+#include <cassert>
+#include <chrono>
+#include <exception>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 #include "data_store_service.h"
 #include "ds_request.pb.h"
+#include "eloq_value_codec.h"
 #include "internal_request.h"
 #include "object_pool.h"
 
@@ -35,6 +41,7 @@ namespace EloqDS
 {
 namespace
 {
+constexpr std::string_view kKeySeparator = "/";
 
 remote::CommonResult MakeCommonResult(remote::DataStoreError error,
                                       std::string error_message = "")
@@ -49,6 +56,52 @@ remote::CommonResult NotStartedResult()
 {
     return MakeCommonResult(remote::DataStoreError::DB_NOT_OPEN,
                             "TiKV data store is not started.");
+}
+
+remote::CommonResult ShardWriteStatusResult(
+    DataStoreService *data_store_service, uint32_t shard_id)
+{
+    if (data_store_service == nullptr)
+    {
+        return MakeCommonResult(remote::DataStoreError::NO_ERROR);
+    }
+
+    const DSShardStatus shard_status =
+        data_store_service->FetchDSShardStatus(shard_id);
+    if (shard_status == DSShardStatus::ReadWrite)
+    {
+        return MakeCommonResult(remote::DataStoreError::NO_ERROR);
+    }
+
+    if (shard_status == DSShardStatus::Closed)
+    {
+        return MakeCommonResult(
+            remote::DataStoreError::REQUESTED_NODE_NOT_OWNER,
+            "Requested data not on local node.");
+    }
+
+    if (shard_status == DSShardStatus::ReadOnly)
+    {
+        return MakeCommonResult(remote::DataStoreError::WRITE_TO_READ_ONLY_DB,
+                                "Write to read-only DB.");
+    }
+
+    return MakeCommonResult(remote::DataStoreError::DB_NOT_OPEN,
+                            "KV store not opened yet.");
+}
+
+bool IsExpired(uint64_t ttl)
+{
+    if (ttl == 0)
+    {
+        return false;
+    }
+
+    const uint64_t now_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    return ttl < now_ms;
 }
 
 }  // namespace
@@ -121,8 +174,36 @@ void TikvDataStore::Read(ReadRequest *read_req)
         return;
     }
 
-    LOG(WARNING) << "TiKV Read is not implemented yet.";
-    read_req->SetFinish(remote::DataStoreError::READ_FAILED);
+    const std::string physical_key = BuildKey(read_req->GetTableName(),
+                                              read_req->GetPartitionId(),
+                                              read_req->GetKey());
+    try
+    {
+        KvGetResult result = kv_client_.Get(physical_key);
+        if (!result.found)
+        {
+            read_req->SetFinish(remote::DataStoreError::KEY_NOT_FOUND);
+            return;
+        }
+
+        auto decoded = EloqValueCodec::DecodeValue(result.value);
+        if (IsExpired(decoded.ttl))
+        {
+            read_req->SetFinish(remote::DataStoreError::KEY_NOT_FOUND);
+            return;
+        }
+
+        read_req->SetRecord(std::move(decoded.record));
+        read_req->SetRecordTs(decoded.ts);
+        read_req->SetRecordTtl(decoded.ttl);
+        read_req->SetFinish(remote::DataStoreError::NO_ERROR);
+    }
+    catch (const std::exception &e)
+    {
+        LOG(ERROR) << "TiKV Read failed, key: " << physical_key
+                   << ", error: " << e.what();
+        read_req->SetFinish(remote::DataStoreError::READ_FAILED);
+    }
 }
 
 void TikvDataStore::BatchWriteRecords(WriteRecordsRequest *batch_write_req)
@@ -142,9 +223,71 @@ void TikvDataStore::BatchWriteRecords(WriteRecordsRequest *batch_write_req)
         return;
     }
 
-    batch_write_req->SetFinish(MakeCommonResult(
-        remote::DataStoreError::WRITE_FAILED,
-        "TiKV BatchWriteRecords is not implemented yet."));
+    remote::CommonResult shard_status_result =
+        ShardWriteStatusResult(data_store_service_, shard_id_);
+    if (shard_status_result.error_code() != remote::DataStoreError::NO_ERROR)
+    {
+        batch_write_req->SetFinish(shard_status_result);
+        return;
+    }
+
+    std::vector<KvMutation> mutations;
+    mutations.reserve(batch_write_req->RecordsCount());
+
+    try
+    {
+        const uint16_t parts_count_per_record =
+            batch_write_req->PartsCountPerRecord();
+        std::vector<std::string_view> record_parts;
+        record_parts.reserve(parts_count_per_record);
+
+        for (size_t i = 0; i < batch_write_req->RecordsCount(); ++i)
+        {
+            std::string physical_key = BuildKey(batch_write_req, i);
+            const WriteOpType op_type = batch_write_req->KeyOpType(i);
+            if (op_type == WriteOpType::DELETE)
+            {
+                mutations.emplace_back(
+                    KvMutation::Delete(std::move(physical_key)));
+                continue;
+            }
+
+            assert(op_type == WriteOpType::PUT);
+            record_parts.clear();
+            for (uint16_t part = 0; part < parts_count_per_record; ++part)
+            {
+                record_parts.emplace_back(batch_write_req->GetRecordPart(
+                    i * parts_count_per_record + part));
+            }
+
+            std::string value = EloqValueCodec::EncodeValue(
+                record_parts,
+                batch_write_req->GetRecordTs(i),
+                batch_write_req->GetRecordTtl(i));
+            mutations.emplace_back(
+                KvMutation::Put(std::move(physical_key), std::move(value)));
+        }
+    }
+    catch (const std::exception &e)
+    {
+        LOG(ERROR) << "TiKV BatchWriteRecords failed while building "
+                      "mutations, table: "
+                   << batch_write_req->GetTableName()
+                   << ", error: " << e.what();
+        batch_write_req->SetFinish(MakeCommonResult(
+            remote::DataStoreError::WRITE_FAILED, e.what()));
+        return;
+    }
+
+    if (!kv_client_.CommitBatch(mutations))
+    {
+        batch_write_req->SetFinish(MakeCommonResult(
+            remote::DataStoreError::WRITE_FAILED, kv_client_.LastError()));
+        return;
+    }
+
+    batch_write_req->SetFinish(
+        MakeCommonResult(remote::DataStoreError::NO_ERROR));
 }
 
 void TikvDataStore::FlushData(FlushDataRequest *flush_data_req)
@@ -257,6 +400,50 @@ void TikvDataStore::SwitchToReadOnly()
 void TikvDataStore::SwitchToReadWrite()
 {
     // No local TiKV backend state needs to be resumed.
+}
+
+std::string TikvDataStore::BuildKeyPrefix(std::string_view table_name,
+                                          int32_t partition_id)
+{
+    std::string prefix;
+    const std::string partition_id_str = std::to_string(partition_id);
+    prefix.reserve(table_name.size() + kKeySeparator.size() +
+                   partition_id_str.size() + kKeySeparator.size());
+    prefix.append(table_name.data(), table_name.size());
+    prefix.append(kKeySeparator.data(), kKeySeparator.size());
+    prefix.append(partition_id_str);
+    prefix.append(kKeySeparator.data(), kKeySeparator.size());
+    return prefix;
+}
+
+std::string TikvDataStore::BuildKey(std::string_view table_name,
+                                    int32_t partition_id,
+                                    std::string_view key)
+{
+    // Do not add TikvConfig::key_prefix_ here. TikvKvClient owns the optional
+    // cluster-wide key prefix so all direct get/commit/scan paths encode it in
+    // exactly one place.
+    std::string physical_key = BuildKeyPrefix(table_name, partition_id);
+    physical_key.append(key.data(), key.size());
+    return physical_key;
+}
+
+std::string TikvDataStore::BuildKey(
+    const WriteRecordsRequest *batch_write_req, size_t record_index)
+{
+    assert(batch_write_req != nullptr);
+
+    std::string physical_key =
+        BuildKeyPrefix(batch_write_req->GetTableName(),
+                       batch_write_req->GetPartitionId());
+    const uint16_t parts_count_per_key = batch_write_req->PartsCountPerKey();
+    for (uint16_t part = 0; part < parts_count_per_key; ++part)
+    {
+        const std::string_view key_part = batch_write_req->GetKeyPart(
+            record_index * parts_count_per_key + part);
+        physical_key.append(key_part.data(), key_part.size());
+    }
+    return physical_key;
 }
 
 }  // namespace EloqDS

@@ -22,6 +22,9 @@
 #pragma once
 
 #include <atomic>
+#include <cstddef>
+#include <string>
+#include <string_view>
 
 #include "data_store.h"
 #include "tikv_config.h"
@@ -68,6 +71,16 @@ public:
     void SwitchToReadWrite() override;
 
 private:
+    static std::string BuildKeyPrefix(std::string_view table_name,
+                                      int32_t partition_id);
+
+    static std::string BuildKey(std::string_view table_name,
+                                int32_t partition_id,
+                                std::string_view key);
+
+    static std::string BuildKey(const WriteRecordsRequest *batch_write_req,
+                                size_t record_index);
+
     TikvConfig config_;
     TikvKvClient kv_client_;
     std::atomic<bool> started_{false};
