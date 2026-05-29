@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <pingcap/kv/Txn.h>
 
 #include <algorithm>
 #include <chrono>
@@ -16,6 +17,7 @@
 #include <vector>
 
 #include "internal_request.h"
+#include "eloq_value_codec.h"
 #include "tikv_data_store.h"
 
 namespace EloqDS
@@ -169,6 +171,20 @@ std::string RecordWithType(char type, std::string_view payload)
     std::string record(1, type);
     record.append(payload.data(), payload.size());
     return record;
+}
+
+std::string PhysicalKey(const TikvConfig &config,
+                        std::string_view table,
+                        int32_t partition,
+                        std::string_view key)
+{
+    std::string physical_key = config.key_prefix_;
+    physical_key.append(table.data(), table.size());
+    physical_key.push_back('/');
+    physical_key.append(std::to_string(partition));
+    physical_key.push_back('/');
+    physical_key.append(key.data(), key.size());
+    return physical_key;
 }
 
 struct SnapshotLookupResult
@@ -649,6 +665,21 @@ protected:
     std::unique_ptr<TikvDataStore> store_;
 };
 
+TEST(TikvBackendFaultInjectionSmokeTest, EmptyPdEndpointsFailFast)
+{
+    TikvConfig bad_config;
+    bad_config.pd_endpoints_.clear();
+    bad_config.request_timeout_seconds_ = 1;
+
+    TikvDataStore bad_store(bad_config, 0, nullptr);
+    ASSERT_TRUE(bad_store.Initialize());
+    EXPECT_FALSE(bad_store.StartDB(1));
+
+    TestReadRequest read_req("unavailable", 1, "k");
+    bad_store.Read(&read_req);
+    EXPECT_EQ(read_req.error_, DataStoreError::DB_NOT_OPEN);
+}
+
 TEST_F(TikvBackendSmokeTest, PutReadDeleteRangeDropAndNoOpSemantics)
 {
     const std::string table = "objects";
@@ -929,6 +960,91 @@ TEST_F(TikvBackendSmokeTest,
     ASSERT_EQ(static_cast<DataStoreError>(drop_archives.result_.error_code()),
               DataStoreError::NO_ERROR)
         << drop_archives.result_.error_msg();
+}
+
+TEST_F(TikvBackendSmokeTest, TransactionConflictKeepsCommittedValue)
+{
+    const std::string table = "fault_txn_conflict";
+    const int32_t partition = 21;
+    const std::string key = "doc";
+    const std::string physical_key =
+        PhysicalKey(config_, table, partition, key);
+
+    auto cluster = std::make_unique<pingcap::kv::Cluster>(
+        config_.pd_endpoints_, config_.cluster_config_);
+    pingcap::kv::Txn stale_txn(cluster.get());
+    stale_txn.set(physical_key,
+                  EloqValueCodec::EncodeValue("stale-value", 400, 0));
+
+    Write(table,
+          partition,
+          {{key, "committed-value", 410, 0, WriteOpType::PUT}});
+
+    EXPECT_THROW(stale_txn.commit(), pingcap::Exception);
+    ExpectRead(table,
+               partition,
+               key,
+               DataStoreError::NO_ERROR,
+               "committed-value",
+               410);
+
+    TestDropTableRequest drop(table);
+    store_->DropTable(&drop);
+    ASSERT_EQ(static_cast<DataStoreError>(drop.result_.error_code()),
+              DataStoreError::NO_ERROR)
+        << drop.result_.error_msg();
+}
+
+TEST_F(TikvBackendSmokeTest, FailedBatchWriteLeavesNoPartialVisibleData)
+{
+    const std::string table = "fault_failed_batch";
+    const int32_t partition = 22;
+    const std::string first_key = "a";
+    const std::string conflict_key = "z";
+    const std::string physical_first =
+        PhysicalKey(config_, table, partition, first_key);
+    const std::string physical_conflict =
+        PhysicalKey(config_, table, partition, conflict_key);
+    const std::string split_key = PhysicalKey(config_, table, partition, "m");
+
+    Write(table,
+          partition,
+          {{conflict_key, "committed-z", 600, 0, WriteOpType::PUT}});
+
+    auto cluster = std::make_unique<pingcap::kv::Cluster>(
+        config_.pd_endpoints_, config_.cluster_config_);
+    cluster->splitRegion(split_key);
+
+    pingcap::kv::Txn stale_batch(cluster.get());
+    stale_batch.set(physical_first,
+                    EloqValueCodec::EncodeValue("rolled-back-a", 610, 0));
+    stale_batch.set(physical_conflict,
+                    EloqValueCodec::EncodeValue("stale-z", 611, 0));
+
+    // Make only the second region conflict after the stale batch has picked
+    // its start_ts. The first region may already be prewritten before the
+    // second region reports write-conflict, so this exercises 2PC cleanup.
+    Write(table,
+          partition,
+          {{conflict_key, "committed-z-after-start", 620, 0, WriteOpType::PUT}});
+
+    EXPECT_THROW(stale_batch.commit(), pingcap::Exception);
+    ExpectRead(table,
+               partition,
+               first_key,
+               DataStoreError::KEY_NOT_FOUND);
+    ExpectRead(table,
+               partition,
+               conflict_key,
+               DataStoreError::NO_ERROR,
+               "committed-z-after-start",
+               620);
+
+    TestDropTableRequest drop(table);
+    store_->DropTable(&drop);
+    ASSERT_EQ(static_cast<DataStoreError>(drop.result_.error_code()),
+              DataStoreError::NO_ERROR)
+        << drop.result_.error_msg();
 }
 
 }  // namespace
