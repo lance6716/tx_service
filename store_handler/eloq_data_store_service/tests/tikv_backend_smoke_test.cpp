@@ -920,6 +920,69 @@ TEST_F(TikvBackendSmokeTest, ExpiredBaseTtlCleanupOnceDeletesBoundedKeys)
         << drop_archives.result_.error_msg();
 }
 
+TEST_F(TikvBackendSmokeTest, RetiredTombstoneCandidateScanUsesWatermark)
+{
+    const std::string table = "tombstone_cleanup_objects";
+    const int32_t partition = 14;
+    const uint64_t ttl_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count() +
+        600000;
+
+    Write(table,
+          partition,
+          {{"old-delete",
+            SerializeEloqDocRecord(true, ""),
+            100,
+            ttl_ms,
+            WriteOpType::PUT},
+           {"at-watermark",
+            SerializeEloqDocRecord(true, ""),
+            200,
+            ttl_ms,
+            WriteOpType::PUT},
+           {"new-delete",
+            SerializeEloqDocRecord(true, ""),
+            250,
+            ttl_ms,
+            WriteOpType::PUT},
+           {"live", "payload", 50, ttl_ms, WriteOpType::PUT}});
+
+    RetiredTombstoneCandidateScanBatch disabled =
+        store_->ScanRetiredTombstoneCandidates(
+            table, partition, "", 10, 10, UnknownArchiveCleanupWatermark());
+    EXPECT_TRUE(disabled.range_finished);
+    EXPECT_EQ(disabled.scanned_items, 0U);
+    EXPECT_TRUE(disabled.candidates.empty());
+
+    RetiredTombstoneCandidateScanBatch batch =
+        store_->ScanRetiredTombstoneCandidates(
+            table, partition, "", 10, 10, TxServiceArchiveCleanupWatermark(200));
+    ASSERT_TRUE(batch.ok) << batch.error_message;
+    EXPECT_TRUE(batch.range_finished);
+    EXPECT_EQ(batch.candidate_items, 1U);
+    ASSERT_EQ(batch.candidates.size(), 1U);
+    EXPECT_EQ(batch.candidates[0].logical_key, "old-delete");
+    EXPECT_EQ(batch.candidates[0].record_ts, 100U);
+
+    RetiredTombstoneCandidateScanBatch archive_batch =
+        store_->ScanRetiredTombstoneCandidates("mvcc_archives",
+                                               partition,
+                                               "",
+                                               10,
+                                               10,
+                                               TxServiceArchiveCleanupWatermark(200));
+    EXPECT_EQ(archive_batch.scanned_items, 0U);
+    EXPECT_TRUE(archive_batch.candidates.empty());
+
+    TestDropTableRequest drop_base(table);
+    store_->DropTable(&drop_base);
+    ASSERT_EQ(static_cast<DataStoreError>(drop_base.result_.error_code()),
+              DataStoreError::NO_ERROR)
+        << drop_base.result_.error_msg();
+}
+
 TEST_F(TikvBackendSmokeTest, ArchiveReverseScanFindsSnapshotVisibleVersion)
 {
     const std::string archive_table = "mvcc_archives";
