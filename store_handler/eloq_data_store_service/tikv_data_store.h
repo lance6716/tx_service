@@ -27,6 +27,7 @@
 #include <string_view>
 
 #include "data_store.h"
+#include "tikv_archive_retention_cleanup.h"
 #include "tikv_config.h"
 #include "tikv_expired_ttl_cleanup.h"
 #include "tikv_kv_client.h"
@@ -86,6 +87,14 @@ public:
         uint32_t max_scan_items,
         uint32_t max_delete_items,
         uint64_t now_ms);
+
+    ArchiveRetentionCandidateScanBatch ScanArchiveRetentionCandidates(
+        int32_t partition_id,
+        std::string_view cursor,
+        uint32_t max_scan_items,
+        uint32_t max_candidates,
+        const ArchiveCleanupWatermark &watermark,
+        const ArchiveRetentionAnchor *initial_anchor = nullptr);
 
 private:
     static std::string BuildKeyPrefix(std::string_view table_name,

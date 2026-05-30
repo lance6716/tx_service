@@ -496,6 +496,18 @@ if(RUN_ELOQ_DSS_TESTS)
     add_test(NAME tikv_archive_cleanup_watermark_test
         COMMAND tikv_archive_cleanup_watermark_test)
 
+    add_executable(tikv_archive_retention_cleanup_test
+        tests/tikv_archive_retention_cleanup_test.cpp
+    )
+    target_include_directories(tikv_archive_retention_cleanup_test PRIVATE
+        ${PROJECT_SOURCE_DIR}
+    )
+    target_link_libraries(tikv_archive_retention_cleanup_test PRIVATE
+        GTest::gtest_main
+    )
+    add_test(NAME tikv_archive_retention_cleanup_test
+        COMMAND tikv_archive_retention_cleanup_test)
+
     add_executable(tikv_expired_ttl_cleanup_test
         tests/tikv_expired_ttl_cleanup_test.cpp
     )
