@@ -533,6 +533,18 @@ if(RUN_ELOQ_DSS_TESTS)
         COMMAND tikv_expired_ttl_cleanup_test)
 
     if(WITH_DATA_STORE STREQUAL "ELOQDSS_TIKV")
+        add_executable(tikv_kv_metrics_test
+            tests/tikv_kv_metrics_test.cpp
+        )
+        target_include_directories(tikv_kv_metrics_test PRIVATE
+            ${PROJECT_SOURCE_DIR}
+        )
+        target_link_libraries(tikv_kv_metrics_test PRIVATE
+            kv_client
+            GTest::gtest_main
+        )
+        add_test(NAME tikv_kv_metrics_test COMMAND tikv_kv_metrics_test)
+
         add_executable(tikv_backend_smoke_test
             tests/tikv_backend_smoke_test.cpp
             tikv_data_store.cpp

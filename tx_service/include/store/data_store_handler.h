@@ -389,6 +389,32 @@ public:
             metrics::kv_meter->Register(
                 metrics::NAME_KV_RANGE_DELETE_DURATION,
                 metrics::Type::Histogram);
+            metrics::kv_meter->Register(
+                metrics::NAME_KV_TIKV_BACKOFF_TOTAL,
+                metrics::Type::Counter,
+                {{"operation",
+                  {"read",
+                   "write",
+                   "delete_keys",
+                   "scan",
+                   "range_delete",
+                   "unknown"}},
+                 {"type",
+                  {"tikv_rpc",
+                   "txn_lock",
+                   "txn_lock_fast",
+                   "pd_rpc",
+                   "region_miss",
+                   "region_scheduling",
+                   "server_busy",
+                   "tikv_disk_full",
+                   "txn_not_found",
+                   "max_ts_not_synced",
+                   "max_data_not_ready",
+                   "max_region_not_initialized",
+                   "tiflash_rpc",
+                   "unknown"}},
+                 {"max_sleep_exceeded", {"false", "true"}}});
         }
     };
 

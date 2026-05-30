@@ -22,6 +22,8 @@
 
 #include "tikv_kv_client.h"
 
+#include "tikv_kv_metrics.h"
+
 #include <glog/logging.h>
 #include <pingcap/Exception.h>
 #include <pingcap/kv/Backoff.h>
@@ -59,11 +61,6 @@ void SetGetRequestContext(kvrpcpb::GetRequest &request,
     }
 }
 
-bool KvMetricsEnabled()
-{
-    return metrics::enable_kv_metrics && metrics::kv_meter != nullptr;
-}
-
 class KvMetricScope
 {
 public:
@@ -71,7 +68,7 @@ public:
                   const metrics::Name &duration_metric)
         : total_metric_(total_metric),
           duration_metric_(duration_metric),
-          enabled_(KvMetricsEnabled()),
+          enabled_(tikv_metrics::KvMetricsEnabled()),
           start_(enabled_ ? metrics::Clock::now() : metrics::TimePoint{})
     {
     }
@@ -117,6 +114,7 @@ bool TikvKvClient::Initialize(const TikvConfig &config)
         config_ = config;
         cluster_ = std::make_unique<pingcap::kv::Cluster>(
             config_.pd_endpoints_, config_.cluster_config_);
+        cluster_->setBackoffObserver(tikv_metrics::CollectBackoffMetric);
         return true;
     }
     catch (const std::exception &e)
@@ -148,6 +146,8 @@ KvGetResult TikvKvClient::Get(const std::string &key)
 {
     EnsureInitialized();
     ClearLastError();
+    tikv_metrics::OperationScope operation_scope(
+        tikv_metrics::Operation::Read);
     KvMetricScope metrics_scope(metrics::NAME_KV_READ_TOTAL,
                                 metrics::NAME_KV_READ_DURATION);
 
@@ -155,7 +155,8 @@ KvGetResult TikvKvClient::Get(const std::string &key)
     {
         const std::string encoded_key = EncodeKey(key);
         const uint64_t read_ts = cluster_->pd_client->getTS();
-        pingcap::kv::Backoffer bo(pingcap::kv::GetMaxBackoff);
+        pingcap::kv::Backoffer bo =
+            cluster_->newBackoffer(pingcap::kv::GetMaxBackoff);
         pingcap::kv::MinCommitTSPushed min_commit_ts_pushed;
 
         for (;;)
@@ -235,6 +236,8 @@ bool TikvKvClient::CommitBatch(const std::vector<KvMutation> &mutations)
     {
         return true;
     }
+    tikv_metrics::OperationScope operation_scope(
+        tikv_metrics::Operation::Write);
     KvMetricScope metrics_scope(metrics::NAME_KV_WRITE_TOTAL,
                                 metrics::NAME_KV_WRITE_DURATION);
 
@@ -281,6 +284,8 @@ bool TikvKvClient::DeleteKeysIf(
     {
         return true;
     }
+    tikv_metrics::OperationScope operation_scope(
+        tikv_metrics::Operation::DeleteKeys);
     KvMetricScope metrics_scope(metrics::NAME_KV_WRITE_TOTAL,
                                 metrics::NAME_KV_WRITE_DURATION);
 
@@ -361,6 +366,8 @@ KvScanResult TikvKvClient::Scan(const KvScanOptions &options)
 {
     EnsureInitialized();
     ClearLastError();
+    tikv_metrics::OperationScope operation_scope(
+        tikv_metrics::Operation::Scan);
     KvMetricScope metrics_scope(metrics::NAME_KV_SCAN_TOTAL,
                                 metrics::NAME_KV_SCAN_DURATION);
 
@@ -406,6 +413,8 @@ bool TikvKvClient::DeleteRange(const std::string &start_key,
     const std::string end =
         end_key.empty() ? PrefixUpperBound() : EncodeKey(end_key);
     const uint32_t batch_size = EffectiveScanLimit(0);
+    tikv_metrics::OperationScope operation_scope(
+        tikv_metrics::Operation::RangeDelete);
     KvMetricScope metrics_scope(metrics::NAME_KV_RANGE_DELETE_TOTAL,
                                 metrics::NAME_KV_RANGE_DELETE_DURATION);
 

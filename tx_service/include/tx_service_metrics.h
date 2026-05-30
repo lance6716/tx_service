@@ -43,6 +43,8 @@ inline const metrics::Name NAME_KV_RANGE_DELETE_TOTAL{
     "kv_range_delete_total"};
 inline const metrics::Name NAME_KV_RANGE_DELETE_DURATION{
     "kv_range_delete_duration"};
+inline const metrics::Name NAME_KV_TIKV_BACKOFF_TOTAL{
+    "kv_tikv_backoff_total"};
 
 inline const metrics::Name NAME_MEMORY_LIMIT{"memory_limit"};
 inline const metrics::Name NAME_CACHE_HIT_OR_MISS_TOTAL{
