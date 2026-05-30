@@ -735,6 +735,12 @@ TEST_F(TikvBackendSmokeTest, PutReadDeleteRangeDropAndNoOpSemantics)
     store_->CreateSnapshotForBackup(&backup);
     EXPECT_EQ(backup.error_, DataStoreError::CREATE_SNAPSHOT_ERROR);
     EXPECT_NE(backup.error_message_.find("does not support"), std::string::npos);
+    EXPECT_NE(backup.error_message_.find("CreateSnapshotForBackup"),
+              std::string::npos);
+    EXPECT_NE(backup.error_message_.find("TiKV BR operator runbook"),
+              std::string::npos);
+    EXPECT_NE(backup.error_message_.find("docs/tikv_eloqdoc_backend_tasks.md"),
+              std::string::npos);
 
     TestDropTableRequest drop(table);
     store_->DropTable(&drop);

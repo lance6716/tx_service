@@ -1205,7 +1205,11 @@ void TikvDataStore::CreateSnapshotForBackup(
     PoolableGuard req_guard(req);
     req->SetFinish(
         remote::DataStoreError::CREATE_SNAPSHOT_ERROR,
-        "TiKV backend does not support DataStore snapshot backup files.");
+        "TiKV backend does not support DataStore/RocksDB snapshot backup "
+        "files through CreateSnapshotForBackup. Use the TiKV BR operator "
+        "runbook in docs/tikv_eloqdoc_backend_tasks.md#backup-and-restore "
+        "and keep this RPC fail-closed until the BR restore validation path "
+        "is implemented.");
 }
 
 void TikvDataStore::SwitchToReadOnly()
