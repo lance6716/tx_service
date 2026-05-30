@@ -972,6 +972,77 @@ ArchiveRetentionCandidateScanBatch TikvDataStore::ScanArchiveRetentionCandidates
     }
 }
 
+ArchiveRetentionCleanupRunResult
+TikvDataStore::RunArchiveRetentionCleanupOnce(
+    int32_t partition_id,
+    std::string_view cursor,
+    uint32_t max_scan_items,
+    uint32_t max_delete_items,
+    const ArchiveCleanupWatermark &watermark,
+    const ArchiveRetentionAnchor *initial_anchor)
+{
+    ArchiveRetentionCleanupRunResult result;
+    if (!ArchiveRetentionCleanupEnabled(watermark) ||
+        max_scan_items == 0 || max_delete_items == 0)
+    {
+        return result;
+    }
+
+    ArchiveRetentionCandidateScanBatch scan_batch =
+        ScanArchiveRetentionCandidates(partition_id,
+                                       cursor,
+                                       max_scan_items,
+                                       max_delete_items,
+                                       watermark,
+                                       initial_anchor);
+    result.scan_batch = scan_batch;
+    result.range_finished = scan_batch.range_finished;
+    result.next_cursor = scan_batch.next_cursor;
+    if (!scan_batch.ok)
+    {
+        result.ok = false;
+        result.error_message = scan_batch.error_message;
+        result.range_finished = false;
+        result.next_cursor =
+            BuildArchiveRetentionRetryCursor(partition_id, cursor);
+        return result;
+    }
+    if (scan_batch.candidates.empty())
+    {
+        return result;
+    }
+
+    const std::vector<std::string> keys =
+        BuildArchiveRetentionDeleteKeys(scan_batch.candidates);
+    KvConditionalDeleteResult delete_result;
+    const bool deleted = kv_client_.DeleteKeysIf(
+        keys,
+        [](std::string_view) {
+            return KvConditionalDeleteDecision::Delete;
+        },
+        &delete_result);
+
+    result.reread_items = delete_result.checked_items;
+    result.not_found_items = delete_result.not_found_items;
+    result.delete_skipped_items = delete_result.skipped_items;
+    result.delete_attempt_items = delete_result.delete_attempt_items;
+    result.deleted_items = delete_result.deleted_items;
+    if (!deleted)
+    {
+        result.ok = false;
+        result.error_message = kv_client_.LastError();
+        if (result.error_message.empty())
+        {
+            result.error_message =
+                "TiKV archive retention cleanup delete failed.";
+        }
+        result.range_finished = false;
+        result.next_cursor =
+            BuildArchiveRetentionRetryCursor(partition_id, cursor);
+    }
+    return result;
+}
+
 void TikvDataStore::CreateSnapshotForBackup(
     CreateSnapshotForBackupRequest *req)
 {

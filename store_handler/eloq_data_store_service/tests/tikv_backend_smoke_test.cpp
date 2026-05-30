@@ -941,6 +941,72 @@ TEST_F(TikvBackendSmokeTest, ArchiveReverseScanFindsSnapshotVisibleVersion)
 }
 
 TEST_F(TikvBackendSmokeTest,
+       ArchiveRetentionCleanupOnceDeletesOnlyScannerCandidates)
+{
+    const std::string table = "archive_retention_objects";
+    const std::string key = "doc-retained";
+    const int32_t archive_partition =
+        static_cast<int32_t>(HashArchivePartition(table, key));
+
+    WriteArchive(table, key, 100, SerializeEloqDocRecord(false, "archive-v100"));
+    WriteArchive(table, key, 200, SerializeEloqDocRecord(false, "archive-v200"));
+    WriteArchive(table, key, 250, SerializeEloqDocRecord(false, "archive-v250"));
+    WriteArchive(table, key, 300, SerializeEloqDocRecord(false, "archive-v300"));
+
+    ArchiveRetentionCleanupRunResult disabled =
+        store_->RunArchiveRetentionCleanupOnce(archive_partition,
+                                               "",
+                                               10,
+                                               10,
+                                               UnknownArchiveCleanupWatermark());
+    EXPECT_TRUE(disabled.ok);
+    EXPECT_EQ(disabled.deleted_items, 0U);
+
+    ArchiveRetentionCleanupRunResult first =
+        store_->RunArchiveRetentionCleanupOnce(
+            archive_partition, "", 10, 1, TxServiceArchiveCleanupWatermark(250));
+    ASSERT_TRUE(first.ok) << first.error_message;
+    EXPECT_FALSE(first.range_finished);
+    EXPECT_EQ(first.scan_batch.candidate_items, 1U);
+    EXPECT_EQ(first.delete_attempt_items, 1U);
+    EXPECT_EQ(first.deleted_items, 1U);
+    ASSERT_TRUE(first.scan_batch.has_carry_anchor);
+
+    ArchiveRetentionCleanupRunResult second =
+        store_->RunArchiveRetentionCleanupOnce(
+            archive_partition,
+            first.next_cursor,
+            10,
+            10,
+            TxServiceArchiveCleanupWatermark(250),
+            &first.scan_batch.carry_anchor);
+    ASSERT_TRUE(second.ok) << second.error_message;
+    EXPECT_EQ(second.deleted_items, 1U);
+
+    ArchiveRetentionCandidateScanBatch remaining =
+        store_->ScanArchiveRetentionCandidates(
+            archive_partition, "", 10, 10, TxServiceArchiveCleanupWatermark(250));
+    ASSERT_TRUE(remaining.ok) << remaining.error_message;
+    EXPECT_TRUE(remaining.candidates.empty());
+
+    SnapshotLookupResult at_watermark = FetchVisibleArchive(table, key, 250);
+    ASSERT_TRUE(at_watermark.found);
+    EXPECT_FALSE(at_watermark.is_deleted);
+    EXPECT_EQ(at_watermark.commit_ts, 250U);
+    EXPECT_EQ(at_watermark.payload, "archive-v250");
+
+    SnapshotLookupResult after_watermark = FetchVisibleArchive(table, key, 350);
+    ASSERT_TRUE(after_watermark.found);
+    EXPECT_EQ(after_watermark.commit_ts, 300U);
+
+    TestDropTableRequest drop("mvcc_archives");
+    store_->DropTable(&drop);
+    ASSERT_EQ(static_cast<DataStoreError>(drop.result_.error_code()),
+              DataStoreError::NO_ERROR)
+        << drop.result_.error_msg();
+}
+
+TEST_F(TikvBackendSmokeTest,
        TxServiceSnapshotReadSurvivesFlushAndStoreRestart)
 {
     const std::string table = "eloqdoc_snapshot_read";

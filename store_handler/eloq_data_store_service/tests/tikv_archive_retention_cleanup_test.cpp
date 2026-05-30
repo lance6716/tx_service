@@ -269,6 +269,33 @@ TEST(TikvArchiveRetentionCleanupTest, CarryAnchorAdvancesPastNewerSkippedRow)
               KeyAfterForExpiredTtlCleanup(second_items[0].key));
 }
 
+TEST(TikvArchiveRetentionCleanupTest, BuildsDeleteKeysFromCandidatesOnly)
+{
+    std::vector<ArchiveRetentionCleanupCandidate> candidates;
+    candidates.push_back(ArchiveRetentionCleanupCandidate{
+        "mvcc_archives/1/doc/100", "doc", 100});
+    candidates.push_back(ArchiveRetentionCleanupCandidate{
+        "mvcc_archives/1/doc/200", "doc", 200});
+
+    std::vector<std::string> keys =
+        BuildArchiveRetentionDeleteKeys(candidates);
+
+    ASSERT_EQ(keys.size(), 2U);
+    EXPECT_EQ(keys[0], "mvcc_archives/1/doc/100");
+    EXPECT_EQ(keys[1], "mvcc_archives/1/doc/200");
+}
+
+TEST(TikvArchiveRetentionCleanupTest, NormalizesArchiveRetryCursor)
+{
+    const std::string prefix =
+        BuildExpiredTtlPartitionPrefix(kMvccArchivesTableName, 12);
+
+    EXPECT_EQ(BuildArchiveRetentionRetryCursor(12, ""), prefix);
+    EXPECT_EQ(BuildArchiveRetentionRetryCursor(12, "other/12/k"), prefix);
+    EXPECT_EQ(BuildArchiveRetentionRetryCursor(12, prefix + "k"),
+              prefix + "k");
+}
+
 TEST(TikvArchiveRetentionCleanupTest, UnknownWatermarkDisablesCandidates)
 {
     const std::string prefix =

@@ -80,6 +80,20 @@ struct ArchiveRetentionCandidateScanBatch
     std::string error_message;
 };
 
+struct ArchiveRetentionCleanupRunResult
+{
+    ArchiveRetentionCandidateScanBatch scan_batch;
+    uint32_t reread_items{0};
+    uint32_t not_found_items{0};
+    uint32_t delete_skipped_items{0};
+    uint32_t delete_attempt_items{0};
+    uint32_t deleted_items{0};
+    bool range_finished{true};
+    bool ok{true};
+    std::string next_cursor;
+    std::string error_message;
+};
+
 inline bool IsArchiveTableForRetentionCleanup(std::string_view table_name)
 {
     return table_name == kMvccArchivesTableName;
@@ -139,6 +153,26 @@ inline ArchiveRetentionCleanupCandidate MakeArchiveRetentionCandidate(
 {
     return ArchiveRetentionCleanupCandidate{
         anchor.physical_key, anchor.archive_key_prefix, anchor.commit_ts};
+}
+
+inline std::vector<std::string> BuildArchiveRetentionDeleteKeys(
+    const std::vector<ArchiveRetentionCleanupCandidate> &candidates)
+{
+    std::vector<std::string> keys;
+    keys.reserve(candidates.size());
+    for (const ArchiveRetentionCleanupCandidate &candidate : candidates)
+    {
+        keys.push_back(candidate.physical_key);
+    }
+    return keys;
+}
+
+inline std::string BuildArchiveRetentionRetryCursor(int32_t partition_id,
+                                                    std::string_view cursor)
+{
+    return NormalizeExpiredTtlScanCursor(
+        BuildExpiredTtlPartitionPrefix(kMvccArchivesTableName, partition_id),
+        cursor);
 }
 
 inline bool ArchiveRetentionCleanupEnabled(
