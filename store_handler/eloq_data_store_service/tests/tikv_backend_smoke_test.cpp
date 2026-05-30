@@ -815,7 +815,12 @@ TEST_F(TikvBackendSmokeTest, ExpiredBaseTtlCleanupOnceDeletesBoundedKeys)
           {{"expired-a", "old-a", 701, now_ms - 1, WriteOpType::PUT},
            {"expired-b", "old-b", 702, now_ms - 1, WriteOpType::PUT},
            {"forever", "forever", 703, 0, WriteOpType::PUT},
-           {"live", "live", 704, now_ms + 600000, WriteOpType::PUT}});
+           {"live", "live", 704, now_ms + 600000, WriteOpType::PUT},
+           {"tombstone",
+            SerializeEloqDocRecord(true, ""),
+            705,
+            now_ms - 1,
+            WriteOpType::PUT}});
 
     ExpiredTtlCleanupRunResult first =
         store_->RunExpiredBaseTtlCleanupOnce(table, partition, "", 10, 1, now_ms);
@@ -849,6 +854,30 @@ TEST_F(TikvBackendSmokeTest, ExpiredBaseTtlCleanupOnceDeletesBoundedKeys)
                DataStoreError::NO_ERROR,
                "live",
                704);
+
+    TestScanRequest scan_after_cleanup(table,
+                                       partition,
+                                       "",
+                                       "",
+                                       true,
+                                       false,
+                                       true,
+                                       10);
+    store_->ScanNext(&scan_after_cleanup);
+    ASSERT_EQ(scan_after_cleanup.error_, DataStoreError::NO_ERROR)
+        << scan_after_cleanup.error_message_;
+    bool tombstone_found = false;
+    for (const auto &item : scan_after_cleanup.items_)
+    {
+        if (item.key == "tombstone")
+        {
+            tombstone_found = true;
+            EXPECT_EQ(item.value, SerializeEloqDocRecord(true, ""));
+            EXPECT_EQ(item.ts, 705U);
+            EXPECT_EQ(item.ttl, now_ms - 1);
+        }
+    }
+    EXPECT_TRUE(tombstone_found);
 
     const std::string archive_key =
         EncodeArchiveKey(table, "archived", 700);

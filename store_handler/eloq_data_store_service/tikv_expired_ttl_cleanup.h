@@ -22,6 +22,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <string>
 #include <string_view>
@@ -63,6 +64,7 @@ enum class ExpiredTtlDeleteDecision
 {
     Delete,
     Skip,
+    RetiredTombstone,
     Malformed
 };
 
@@ -152,6 +154,17 @@ inline bool IsExpiredForCleanup(uint64_t ttl, uint64_t now_ms)
     return ttl > 0 && ttl < now_ms;
 }
 
+inline bool IsRetiredTombstoneRecord(std::string_view record)
+{
+    // DataStoreServiceClient::SerializeTxRecord(true, nullptr) encodes a
+    // retired tombstone as exactly one bool byte. Check the canonical true byte
+    // explicitly instead of interpreting arbitrary one-byte payloads as bools:
+    // object-table values and unit tests may contain single data bytes.
+    const bool is_deleted = true;
+    return record.size() == sizeof(is_deleted) &&
+           std::memcmp(record.data(), &is_deleted, sizeof(is_deleted)) == 0;
+}
+
 inline ExpiredTtlDeleteCheck CheckExpiredTtlDeleteCandidate(
     std::string_view current_value,
     uint64_t now_ms)
@@ -159,6 +172,12 @@ inline ExpiredTtlDeleteCheck CheckExpiredTtlDeleteCandidate(
     try
     {
         auto decoded = EloqValueCodec::DecodeValue(current_value);
+        if (IsRetiredTombstoneRecord(decoded.record))
+        {
+            return {ExpiredTtlDeleteDecision::RetiredTombstone,
+                    decoded.ts,
+                    decoded.ttl};
+        }
         if (IsExpiredForCleanup(decoded.ttl, now_ms))
         {
             return {ExpiredTtlDeleteDecision::Delete,
@@ -207,7 +226,11 @@ inline ExpiredTtlCandidateScanBatch CollectExpiredTtlCandidatesFromScan(
         try
         {
             auto decoded = EloqValueCodec::DecodeValue(item.value);
-            if (IsExpiredForCleanup(decoded.ttl, now_ms))
+            if (IsRetiredTombstoneRecord(decoded.record))
+            {
+                ++batch.skipped_items;
+            }
+            else if (IsExpiredForCleanup(decoded.ttl, now_ms))
             {
                 ++batch.expired_items;
                 batch.candidates.push_back(ExpiredTtlCleanupCandidate{

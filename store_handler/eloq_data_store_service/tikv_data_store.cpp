@@ -871,6 +871,8 @@ ExpiredTtlCleanupRunResult TikvDataStore::RunExpiredBaseTtlCleanupOnce(
             {
             case ExpiredTtlDeleteDecision::Delete:
                 return KvConditionalDeleteDecision::Delete;
+            case ExpiredTtlDeleteDecision::RetiredTombstone:
+                return KvConditionalDeleteDecision::Skip;
             case ExpiredTtlDeleteDecision::Malformed:
                 return KvConditionalDeleteDecision::Malformed;
             case ExpiredTtlDeleteDecision::Skip:

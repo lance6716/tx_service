@@ -45,6 +45,13 @@ std::string TruncatedTtlValue()
     return value;
 }
 
+std::string TombstoneRecord()
+{
+    const bool is_deleted = true;
+    return std::string(reinterpret_cast<const char *>(&is_deleted),
+                       sizeof(is_deleted));
+}
+
 TEST(TikvExpiredTtlCleanupTest, ExcludesMvccArchivesTable)
 {
     EXPECT_TRUE(IsBaseTableForExpiredTtlCleanup("db.table"));
@@ -59,6 +66,7 @@ TEST(TikvExpiredTtlCleanupTest, CollectsOnlyExpiredTtlCandidates)
     const uint64_t now_ms = 1000;
     std::vector<ExpiredTtlScanItem> items;
     items.push_back(Item(prefix + "expired", "old", 10, 999));
+    items.push_back(Item(prefix + "tombstone", TombstoneRecord(), 11, 998));
     items.push_back(Item(prefix + "live", "live", 11, 1000));
     items.push_back(Item(prefix + "no-ttl", "forever", 12, 0));
     items.push_back(ExpiredTtlScanItem{prefix + "bad", "short"});
@@ -70,9 +78,9 @@ TEST(TikvExpiredTtlCleanupTest, CollectsOnlyExpiredTtlCandidates)
 
     ASSERT_TRUE(batch.ok);
     EXPECT_TRUE(batch.range_finished);
-    EXPECT_EQ(batch.scanned_items, 5U);
+    EXPECT_EQ(batch.scanned_items, 6U);
     EXPECT_EQ(batch.expired_items, 1U);
-    EXPECT_EQ(batch.skipped_items, 4U);
+    EXPECT_EQ(batch.skipped_items, 5U);
     EXPECT_EQ(batch.malformed_items, 2U);
     ASSERT_EQ(batch.candidates.size(), 1U);
     EXPECT_EQ(batch.candidates[0].physical_key, prefix + "expired");
@@ -100,6 +108,13 @@ TEST(TikvExpiredTtlCleanupTest, RecheckDeleteDecisionIsConservative)
     ExpiredTtlDeleteCheck no_ttl = CheckExpiredTtlDeleteCandidate(
         EloqValueCodec::EncodeValue("forever", 12, 0), now_ms);
     EXPECT_EQ(no_ttl.decision, ExpiredTtlDeleteDecision::Skip);
+
+    ExpiredTtlDeleteCheck tombstone = CheckExpiredTtlDeleteCandidate(
+        EloqValueCodec::EncodeValue(TombstoneRecord(), 13, 999), now_ms);
+    EXPECT_EQ(tombstone.decision,
+              ExpiredTtlDeleteDecision::RetiredTombstone);
+    EXPECT_EQ(tombstone.record_ts, 13U);
+    EXPECT_EQ(tombstone.ttl, 999U);
 
     ExpiredTtlDeleteCheck malformed =
         CheckExpiredTtlDeleteCandidate("short", now_ms);
