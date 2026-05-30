@@ -113,6 +113,14 @@ public:
         uint32_t max_candidates,
         const ArchiveCleanupWatermark &watermark);
 
+    RetiredTombstoneCleanupRunResult RunRetiredTombstoneCleanupOnce(
+        std::string_view table_name,
+        int32_t partition_id,
+        std::string_view cursor,
+        uint32_t max_scan_items,
+        uint32_t max_delete_items,
+        const ArchiveCleanupWatermark &watermark);
+
 private:
     static std::string BuildKeyPrefix(std::string_view table_name,
                                       int32_t partition_id);

@@ -920,7 +920,7 @@ TEST_F(TikvBackendSmokeTest, ExpiredBaseTtlCleanupOnceDeletesBoundedKeys)
         << drop_archives.result_.error_msg();
 }
 
-TEST_F(TikvBackendSmokeTest, RetiredTombstoneCandidateScanUsesWatermark)
+TEST_F(TikvBackendSmokeTest, RetiredTombstoneCleanupOnceDeletesOnlyCandidates)
 {
     const std::string table = "tombstone_cleanup_objects";
     const int32_t partition = 14;
@@ -949,12 +949,12 @@ TEST_F(TikvBackendSmokeTest, RetiredTombstoneCandidateScanUsesWatermark)
             WriteOpType::PUT},
            {"live", "payload", 50, ttl_ms, WriteOpType::PUT}});
 
-    RetiredTombstoneCandidateScanBatch disabled =
-        store_->ScanRetiredTombstoneCandidates(
+    RetiredTombstoneCleanupRunResult disabled =
+        store_->RunRetiredTombstoneCleanupOnce(
             table, partition, "", 10, 10, UnknownArchiveCleanupWatermark());
     EXPECT_TRUE(disabled.range_finished);
-    EXPECT_EQ(disabled.scanned_items, 0U);
-    EXPECT_TRUE(disabled.candidates.empty());
+    EXPECT_EQ(disabled.scan_batch.scanned_items, 0U);
+    EXPECT_EQ(disabled.deleted_items, 0U);
 
     RetiredTombstoneCandidateScanBatch batch =
         store_->ScanRetiredTombstoneCandidates(
@@ -966,15 +966,52 @@ TEST_F(TikvBackendSmokeTest, RetiredTombstoneCandidateScanUsesWatermark)
     EXPECT_EQ(batch.candidates[0].logical_key, "old-delete");
     EXPECT_EQ(batch.candidates[0].record_ts, 100U);
 
-    RetiredTombstoneCandidateScanBatch archive_batch =
-        store_->ScanRetiredTombstoneCandidates("mvcc_archives",
+    RetiredTombstoneCleanupRunResult first =
+        store_->RunRetiredTombstoneCleanupOnce(
+            table, partition, "", 10, 1, TxServiceArchiveCleanupWatermark(200));
+    ASSERT_TRUE(first.ok) << first.error_message;
+    EXPECT_FALSE(first.range_finished);
+    EXPECT_EQ(first.scan_batch.candidate_items, 1U);
+    EXPECT_EQ(first.reread_items, 1U);
+    EXPECT_EQ(first.delete_attempt_items, 1U);
+    EXPECT_EQ(first.deleted_items, 1U);
+    ASSERT_FALSE(first.next_cursor.empty());
+
+    RetiredTombstoneCleanupRunResult second =
+        store_->RunRetiredTombstoneCleanupOnce(table,
+                                               partition,
+                                               first.next_cursor,
+                                               10,
+                                               10,
+                                               TxServiceArchiveCleanupWatermark(200));
+    ASSERT_TRUE(second.ok) << second.error_message;
+    EXPECT_TRUE(second.range_finished);
+    EXPECT_EQ(second.deleted_items, 0U);
+
+    ExpectRead(table, partition, "old-delete", DataStoreError::KEY_NOT_FOUND);
+    ExpectRead(table,
+               partition,
+               "at-watermark",
+               DataStoreError::NO_ERROR,
+               SerializeEloqDocRecord(true, ""),
+               200);
+    ExpectRead(table,
+               partition,
+               "new-delete",
+               DataStoreError::NO_ERROR,
+               SerializeEloqDocRecord(true, ""),
+               250);
+    ExpectRead(table, partition, "live", DataStoreError::NO_ERROR, "payload", 50);
+
+    RetiredTombstoneCleanupRunResult archive_cleanup =
+        store_->RunRetiredTombstoneCleanupOnce("mvcc_archives",
                                                partition,
                                                "",
                                                10,
                                                10,
                                                TxServiceArchiveCleanupWatermark(200));
-    EXPECT_EQ(archive_batch.scanned_items, 0U);
-    EXPECT_TRUE(archive_batch.candidates.empty());
+    EXPECT_EQ(archive_cleanup.scan_batch.scanned_items, 0U);
+    EXPECT_EQ(archive_cleanup.deleted_items, 0U);
 
     TestDropTableRequest drop_base(table);
     store_->DropTable(&drop_base);

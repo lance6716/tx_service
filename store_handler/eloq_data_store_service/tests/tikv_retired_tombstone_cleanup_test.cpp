@@ -111,6 +111,49 @@ TEST(TikvRetiredTombstoneCleanupTest,
     EXPECT_EQ(batch.candidates[0].ttl, 1000U);
 }
 
+TEST(TikvRetiredTombstoneCleanupTest, RecheckDeleteDecisionIsConservative)
+{
+    RetiredTombstoneDeleteCheck old_tombstone =
+        CheckRetiredTombstoneDeleteCandidate(
+            EloqValueCodec::EncodeValue(TombstoneRecord(), 99, 1000),
+            TxServiceArchiveCleanupWatermark(100));
+    EXPECT_EQ(old_tombstone.decision,
+              RetiredTombstoneDeleteDecision::Delete);
+    EXPECT_EQ(old_tombstone.record_ts, 99U);
+    EXPECT_EQ(old_tombstone.ttl, 1000U);
+
+    RetiredTombstoneDeleteCheck exact_tombstone =
+        CheckRetiredTombstoneDeleteCandidate(
+            EloqValueCodec::EncodeValue(TombstoneRecord(), 100, 1000),
+            TxServiceArchiveCleanupWatermark(100));
+    EXPECT_EQ(exact_tombstone.decision,
+              RetiredTombstoneDeleteDecision::Skip);
+    EXPECT_EQ(exact_tombstone.record_ts, 100U);
+
+    RetiredTombstoneDeleteCheck live =
+        CheckRetiredTombstoneDeleteCandidate(
+            EloqValueCodec::EncodeValue("payload", 50, 1000),
+            TxServiceArchiveCleanupWatermark(100));
+    EXPECT_EQ(live.decision, RetiredTombstoneDeleteDecision::Skip);
+
+    RetiredTombstoneDeleteCheck disabled =
+        CheckRetiredTombstoneDeleteCandidate(
+            EloqValueCodec::EncodeValue(TombstoneRecord(), 99, 1000),
+            UnknownArchiveCleanupWatermark());
+    EXPECT_EQ(disabled.decision, RetiredTombstoneDeleteDecision::Skip);
+
+    RetiredTombstoneDeleteCheck malformed =
+        CheckRetiredTombstoneDeleteCandidate("short",
+                                             TxServiceArchiveCleanupWatermark(100));
+    EXPECT_EQ(malformed.decision, RetiredTombstoneDeleteDecision::Malformed);
+
+    RetiredTombstoneDeleteCheck truncated_ttl =
+        CheckRetiredTombstoneDeleteCandidate(
+            TruncatedTtlValue(), TxServiceArchiveCleanupWatermark(100));
+    EXPECT_EQ(truncated_ttl.decision,
+              RetiredTombstoneDeleteDecision::Malformed);
+}
+
 TEST(TikvRetiredTombstoneCleanupTest, CandidateLimitStopsAtCandidate)
 {
     const std::string prefix = BuildExpiredTtlPartitionPrefix("db.table", 3);
@@ -129,6 +172,33 @@ TEST(TikvRetiredTombstoneCleanupTest, CandidateLimitStopsAtCandidate)
     ASSERT_EQ(batch.candidates.size(), 1U);
     EXPECT_EQ(batch.candidates[0].logical_key, "a");
     EXPECT_EQ(batch.next_cursor, KeyAfterForExpiredTtlCleanup(prefix + "a"));
+}
+
+TEST(TikvRetiredTombstoneCleanupTest, BuildsDeleteKeysFromCandidatesOnly)
+{
+    std::vector<RetiredTombstoneCleanupCandidate> candidates;
+    candidates.push_back(
+        RetiredTombstoneCleanupCandidate{"db.table/1/a", "a", 1, 10});
+    candidates.push_back(
+        RetiredTombstoneCleanupCandidate{"db.table/1/b", "b", 2, 11});
+
+    std::vector<std::string> keys =
+        BuildRetiredTombstoneDeleteKeys(candidates);
+
+    ASSERT_EQ(keys.size(), 2U);
+    EXPECT_EQ(keys[0], "db.table/1/a");
+    EXPECT_EQ(keys[1], "db.table/1/b");
+}
+
+TEST(TikvRetiredTombstoneCleanupTest, NormalizesRetryCursor)
+{
+    const std::string prefix = BuildExpiredTtlPartitionPrefix("db.table", 12);
+
+    EXPECT_EQ(BuildRetiredTombstoneRetryCursor("db.table", 12, ""), prefix);
+    EXPECT_EQ(BuildRetiredTombstoneRetryCursor("db.table", 12, "other/12/k"),
+              prefix);
+    EXPECT_EQ(BuildRetiredTombstoneRetryCursor("db.table", 12, prefix + "k"),
+              prefix + "k");
 }
 
 TEST(TikvRetiredTombstoneCleanupTest, ScanMoreUsesReturnedCursor)

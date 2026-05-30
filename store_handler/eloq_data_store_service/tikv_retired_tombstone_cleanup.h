@@ -61,6 +61,36 @@ struct RetiredTombstoneCandidateScanBatch
     std::string error_message;
 };
 
+enum class RetiredTombstoneDeleteDecision
+{
+    Delete,
+    Skip,
+    Malformed
+};
+
+struct RetiredTombstoneDeleteCheck
+{
+    RetiredTombstoneDeleteDecision decision{
+        RetiredTombstoneDeleteDecision::Skip};
+    uint64_t record_ts{0};
+    uint64_t ttl{0};
+};
+
+struct RetiredTombstoneCleanupRunResult
+{
+    RetiredTombstoneCandidateScanBatch scan_batch;
+    uint32_t reread_items{0};
+    uint32_t not_found_items{0};
+    uint32_t delete_skipped_items{0};
+    uint32_t delete_malformed_items{0};
+    uint32_t delete_attempt_items{0};
+    uint32_t deleted_items{0};
+    bool range_finished{true};
+    bool ok{true};
+    std::string next_cursor;
+    std::string error_message;
+};
+
 inline bool IsBaseTableForRetiredTombstoneCleanup(
     std::string_view table_name)
 {
@@ -84,6 +114,55 @@ inline bool IsSafeRetiredTombstoneCandidate(
     // still need a tombstone committed at that timestamp for delete visibility.
     return IsRetiredTombstoneRecord(decoded.record) &&
            decoded.ts < watermark.timestamp_;
+}
+
+inline RetiredTombstoneDeleteCheck CheckRetiredTombstoneDeleteCandidate(
+    std::string_view current_value,
+    const ArchiveCleanupWatermark &watermark)
+{
+    if (!RetiredTombstoneCleanupEnabled(watermark))
+    {
+        return {};
+    }
+
+    try
+    {
+        auto decoded = EloqValueCodec::DecodeValue(current_value);
+        if (IsSafeRetiredTombstoneCandidate(decoded, watermark))
+        {
+            return {RetiredTombstoneDeleteDecision::Delete,
+                    decoded.ts,
+                    decoded.ttl};
+        }
+        return {RetiredTombstoneDeleteDecision::Skip,
+                decoded.ts,
+                decoded.ttl};
+    }
+    catch (const std::exception &)
+    {
+        return {RetiredTombstoneDeleteDecision::Malformed, 0, 0};
+    }
+}
+
+inline std::vector<std::string> BuildRetiredTombstoneDeleteKeys(
+    const std::vector<RetiredTombstoneCleanupCandidate> &candidates)
+{
+    std::vector<std::string> keys;
+    keys.reserve(candidates.size());
+    for (const RetiredTombstoneCleanupCandidate &candidate : candidates)
+    {
+        keys.push_back(candidate.physical_key);
+    }
+    return keys;
+}
+
+inline std::string BuildRetiredTombstoneRetryCursor(
+    std::string_view table_name,
+    int32_t partition_id,
+    std::string_view cursor)
+{
+    return NormalizeExpiredTtlScanCursor(
+        BuildExpiredTtlPartitionPrefix(table_name, partition_id), cursor);
 }
 
 inline RetiredTombstoneCandidateScanBatch
