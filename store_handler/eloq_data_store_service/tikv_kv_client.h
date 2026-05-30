@@ -25,9 +25,11 @@
 #include <pingcap/kv/Cluster.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -88,6 +90,23 @@ struct KvMutation
     std::string value;
 };
 
+enum class KvConditionalDeleteDecision
+{
+    Delete,
+    Skip,
+    Malformed
+};
+
+struct KvConditionalDeleteResult
+{
+    uint32_t checked_items{0};
+    uint32_t not_found_items{0};
+    uint32_t skipped_items{0};
+    uint32_t malformed_items{0};
+    uint32_t delete_attempt_items{0};
+    uint32_t deleted_items{0};
+};
+
 class TikvKvClient
 {
 public:
@@ -105,6 +124,11 @@ public:
 
     KvGetResult Get(const std::string &key);
     bool CommitBatch(const std::vector<KvMutation> &mutations);
+    bool DeleteKeysIf(
+        const std::vector<std::string> &keys,
+        const std::function<KvConditionalDeleteDecision(std::string_view)>
+            &predicate,
+        KvConditionalDeleteResult *result);
     KvScanResult Scan(const KvScanOptions &options);
     bool DeleteRange(const std::string &start_key, const std::string &end_key);
 

@@ -801,6 +801,96 @@ TEST_F(TikvBackendSmokeTest, ForwardReverseScanPaginationAndTypeFiltering)
         << drop.result_.error_msg();
 }
 
+TEST_F(TikvBackendSmokeTest, ExpiredBaseTtlCleanupOnceDeletesBoundedKeys)
+{
+    const std::string table = "ttl_cleanup_objects";
+    const int32_t partition = 13;
+    const uint64_t now_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count();
+
+    Write(table,
+          partition,
+          {{"expired-a", "old-a", 701, now_ms - 1, WriteOpType::PUT},
+           {"expired-b", "old-b", 702, now_ms - 1, WriteOpType::PUT},
+           {"forever", "forever", 703, 0, WriteOpType::PUT},
+           {"live", "live", 704, now_ms + 600000, WriteOpType::PUT}});
+
+    ExpiredTtlCleanupRunResult first =
+        store_->RunExpiredBaseTtlCleanupOnce(table, partition, "", 10, 1, now_ms);
+    ASSERT_TRUE(first.ok) << first.error_message;
+    EXPECT_FALSE(first.range_finished);
+    EXPECT_EQ(first.scan_batch.expired_items, 1U);
+    EXPECT_EQ(first.reread_items, 1U);
+    EXPECT_EQ(first.delete_attempt_items, 1U);
+    EXPECT_EQ(first.deleted_items, 1U);
+    ASSERT_FALSE(first.next_cursor.empty());
+
+    ExpiredTtlCleanupRunResult second = store_->RunExpiredBaseTtlCleanupOnce(
+        table, partition, first.next_cursor, 10, 10, now_ms);
+    ASSERT_TRUE(second.ok) << second.error_message;
+    EXPECT_EQ(second.deleted_items, 1U);
+
+    ExpiredTtlCandidateScanBatch remaining =
+        store_->ScanExpiredBaseTtlCandidates(table, partition, "", 10, 10, now_ms);
+    ASSERT_TRUE(remaining.ok) << remaining.error_message;
+    EXPECT_TRUE(remaining.candidates.empty());
+
+    ExpectRead(table,
+               partition,
+               "forever",
+               DataStoreError::NO_ERROR,
+               "forever",
+               703);
+    ExpectRead(table,
+               partition,
+               "live",
+               DataStoreError::NO_ERROR,
+               "live",
+               704);
+
+    const std::string archive_key =
+        EncodeArchiveKey(table, "archived", 700);
+    const int32_t archive_partition = static_cast<int32_t>(
+        HashArchivePartition(table, "archived"));
+    Write("mvcc_archives",
+          archive_partition,
+          {{archive_key, "archived-value", 700, now_ms - 1, WriteOpType::PUT}});
+
+    ExpiredTtlCleanupRunResult archive_cleanup =
+        store_->RunExpiredBaseTtlCleanupOnce(
+            "mvcc_archives", archive_partition, "", 10, 10, now_ms);
+    EXPECT_TRUE(archive_cleanup.ok);
+    EXPECT_EQ(archive_cleanup.deleted_items, 0U);
+
+    TestScanRequest archive_scan("mvcc_archives",
+                                 archive_partition,
+                                 "",
+                                 "",
+                                 true,
+                                 false,
+                                 true,
+                                 10);
+    store_->ScanNext(&archive_scan);
+    ASSERT_EQ(archive_scan.error_, DataStoreError::NO_ERROR)
+        << archive_scan.error_message_;
+    ASSERT_EQ(archive_scan.items_.size(), 1U);
+    EXPECT_EQ(archive_scan.items_[0].key, archive_key);
+
+    TestDropTableRequest drop_base(table);
+    store_->DropTable(&drop_base);
+    ASSERT_EQ(static_cast<DataStoreError>(drop_base.result_.error_code()),
+              DataStoreError::NO_ERROR)
+        << drop_base.result_.error_msg();
+
+    TestDropTableRequest drop_archives("mvcc_archives");
+    store_->DropTable(&drop_archives);
+    ASSERT_EQ(static_cast<DataStoreError>(drop_archives.result_.error_code()),
+              DataStoreError::NO_ERROR)
+        << drop_archives.result_.error_msg();
+}
+
 TEST_F(TikvBackendSmokeTest, ArchiveReverseScanFindsSnapshotVisibleVersion)
 {
     const std::string archive_table = "mvcc_archives";

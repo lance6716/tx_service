@@ -817,6 +817,92 @@ ExpiredTtlCandidateScanBatch TikvDataStore::ScanExpiredBaseTtlCandidates(
     }
 }
 
+ExpiredTtlCleanupRunResult TikvDataStore::RunExpiredBaseTtlCleanupOnce(
+    std::string_view table_name,
+    int32_t partition_id,
+    std::string_view cursor,
+    uint32_t max_scan_items,
+    uint32_t max_delete_items,
+    uint64_t now_ms)
+{
+    ExpiredTtlCleanupRunResult result;
+    if (!IsBaseTableForExpiredTtlCleanup(table_name) ||
+        max_scan_items == 0 || max_delete_items == 0)
+    {
+        return result;
+    }
+
+    ExpiredTtlCandidateScanBatch scan_batch =
+        ScanExpiredBaseTtlCandidates(table_name,
+                                     partition_id,
+                                     cursor,
+                                     max_scan_items,
+                                     max_delete_items,
+                                     now_ms);
+    result.scan_batch = scan_batch;
+    result.range_finished = scan_batch.range_finished;
+    result.next_cursor = scan_batch.next_cursor;
+    if (!scan_batch.ok)
+    {
+        result.ok = false;
+        result.error_message = scan_batch.error_message;
+        return result;
+    }
+    if (scan_batch.candidates.empty())
+    {
+        return result;
+    }
+
+    std::vector<std::string> keys;
+    keys.reserve(scan_batch.candidates.size());
+    for (const ExpiredTtlCleanupCandidate &candidate :
+         scan_batch.candidates)
+    {
+        keys.push_back(candidate.physical_key);
+    }
+
+    KvConditionalDeleteResult delete_result;
+    const bool deleted = kv_client_.DeleteKeysIf(
+        keys,
+        [now_ms](std::string_view current_value) {
+            const ExpiredTtlDeleteCheck check =
+                CheckExpiredTtlDeleteCandidate(current_value, now_ms);
+            switch (check.decision)
+            {
+            case ExpiredTtlDeleteDecision::Delete:
+                return KvConditionalDeleteDecision::Delete;
+            case ExpiredTtlDeleteDecision::Malformed:
+                return KvConditionalDeleteDecision::Malformed;
+            case ExpiredTtlDeleteDecision::Skip:
+                return KvConditionalDeleteDecision::Skip;
+            }
+            return KvConditionalDeleteDecision::Skip;
+        },
+        &delete_result);
+
+    result.reread_items = delete_result.checked_items;
+    result.not_found_items = delete_result.not_found_items;
+    result.delete_skipped_items = delete_result.skipped_items;
+    result.delete_malformed_items = delete_result.malformed_items;
+    result.delete_attempt_items = delete_result.delete_attempt_items;
+    result.deleted_items = delete_result.deleted_items;
+    if (!deleted)
+    {
+        result.ok = false;
+        result.error_message = kv_client_.LastError();
+        if (result.error_message.empty())
+        {
+            result.error_message =
+                "TiKV expired TTL cleanup delete failed.";
+        }
+        result.range_finished = false;
+        result.next_cursor = NormalizeExpiredTtlScanCursor(
+            BuildExpiredTtlPartitionPrefix(table_name, partition_id),
+            cursor);
+    }
+    return result;
+}
+
 void TikvDataStore::CreateSnapshotForBackup(
     CreateSnapshotForBackupRequest *req)
 {

@@ -79,6 +79,14 @@ public:
         uint32_t max_candidates,
         uint64_t now_ms);
 
+    ExpiredTtlCleanupRunResult RunExpiredBaseTtlCleanupOnce(
+        std::string_view table_name,
+        int32_t partition_id,
+        std::string_view cursor,
+        uint32_t max_scan_items,
+        uint32_t max_delete_items,
+        uint64_t now_ms);
+
 private:
     static std::string BuildKeyPrefix(std::string_view table_name,
                                       int32_t partition_id);

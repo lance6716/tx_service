@@ -59,6 +59,35 @@ struct ExpiredTtlCandidateScanBatch
     std::string error_message;
 };
 
+enum class ExpiredTtlDeleteDecision
+{
+    Delete,
+    Skip,
+    Malformed
+};
+
+struct ExpiredTtlDeleteCheck
+{
+    ExpiredTtlDeleteDecision decision{ExpiredTtlDeleteDecision::Skip};
+    uint64_t record_ts{0};
+    uint64_t ttl{0};
+};
+
+struct ExpiredTtlCleanupRunResult
+{
+    ExpiredTtlCandidateScanBatch scan_batch;
+    uint32_t reread_items{0};
+    uint32_t not_found_items{0};
+    uint32_t delete_skipped_items{0};
+    uint32_t delete_malformed_items{0};
+    uint32_t delete_attempt_items{0};
+    uint32_t deleted_items{0};
+    bool range_finished{true};
+    bool ok{true};
+    std::string next_cursor;
+    std::string error_message;
+};
+
 inline bool StartsWithForExpiredTtlCleanup(std::string_view value,
                                            std::string_view prefix)
 {
@@ -121,6 +150,27 @@ inline std::string NormalizeExpiredTtlScanCursor(std::string_view prefix,
 inline bool IsExpiredForCleanup(uint64_t ttl, uint64_t now_ms)
 {
     return ttl > 0 && ttl < now_ms;
+}
+
+inline ExpiredTtlDeleteCheck CheckExpiredTtlDeleteCandidate(
+    std::string_view current_value,
+    uint64_t now_ms)
+{
+    try
+    {
+        auto decoded = EloqValueCodec::DecodeValue(current_value);
+        if (IsExpiredForCleanup(decoded.ttl, now_ms))
+        {
+            return {ExpiredTtlDeleteDecision::Delete,
+                    decoded.ts,
+                    decoded.ttl};
+        }
+        return {ExpiredTtlDeleteDecision::Skip, decoded.ts, decoded.ttl};
+    }
+    catch (const std::exception &)
+    {
+        return {ExpiredTtlDeleteDecision::Malformed, 0, 0};
+    }
 }
 
 inline ExpiredTtlCandidateScanBatch CollectExpiredTtlCandidatesFromScan(

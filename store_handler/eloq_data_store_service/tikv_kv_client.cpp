@@ -265,6 +265,98 @@ bool TikvKvClient::CommitBatch(const std::vector<KvMutation> &mutations)
     }
 }
 
+bool TikvKvClient::DeleteKeysIf(
+    const std::vector<std::string> &keys,
+    const std::function<KvConditionalDeleteDecision(std::string_view)>
+        &predicate,
+    KvConditionalDeleteResult *result)
+{
+    EnsureInitialized();
+    ClearLastError();
+    if (result != nullptr)
+    {
+        *result = KvConditionalDeleteResult{};
+    }
+    if (keys.empty())
+    {
+        return true;
+    }
+    KvMetricScope metrics_scope(metrics::NAME_KV_WRITE_TOTAL,
+                                metrics::NAME_KV_WRITE_DURATION);
+
+    try
+    {
+        pingcap::kv::Txn txn(cluster_.get());
+        uint32_t delete_attempt_items = 0;
+        for (const std::string &key : keys)
+        {
+            const std::string encoded_key = EncodeKey(key);
+            auto [value, found] = txn.get(encoded_key);
+            if (result != nullptr)
+            {
+                ++result->checked_items;
+            }
+
+            if (!found)
+            {
+                if (result != nullptr)
+                {
+                    ++result->not_found_items;
+                    ++result->skipped_items;
+                }
+                continue;
+            }
+
+            const KvConditionalDeleteDecision decision = predicate(value);
+            switch (decision)
+            {
+            case KvConditionalDeleteDecision::Delete:
+                txn.del(encoded_key);
+                ++delete_attempt_items;
+                if (result != nullptr)
+                {
+                    ++result->delete_attempt_items;
+                }
+                break;
+            case KvConditionalDeleteDecision::Malformed:
+                if (result != nullptr)
+                {
+                    ++result->malformed_items;
+                    ++result->skipped_items;
+                }
+                break;
+            case KvConditionalDeleteDecision::Skip:
+                if (result != nullptr)
+                {
+                    ++result->skipped_items;
+                }
+                break;
+            }
+        }
+
+        if (delete_attempt_items == 0)
+        {
+            return true;
+        }
+        txn.commit();
+        if (result != nullptr)
+        {
+            result->deleted_items = result->delete_attempt_items;
+        }
+        return true;
+    }
+    catch (const std::exception &e)
+    {
+        SetLastError(e.what());
+        LOG(ERROR) << "TiKV DeleteKeysIf failed: " << e.what();
+        if (result != nullptr)
+        {
+            result->deleted_items = 0;
+        }
+        return false;
+    }
+}
+
 KvScanResult TikvKvClient::Scan(const KvScanOptions &options)
 {
     EnsureInitialized();

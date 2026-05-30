@@ -81,6 +81,35 @@ TEST(TikvExpiredTtlCleanupTest, CollectsOnlyExpiredTtlCandidates)
     EXPECT_EQ(batch.candidates[0].ttl, 999U);
 }
 
+TEST(TikvExpiredTtlCleanupTest, RecheckDeleteDecisionIsConservative)
+{
+    const uint64_t now_ms = 1000;
+
+    ExpiredTtlDeleteCheck expired = CheckExpiredTtlDeleteCandidate(
+        EloqValueCodec::EncodeValue("old", 10, 999), now_ms);
+    EXPECT_EQ(expired.decision, ExpiredTtlDeleteDecision::Delete);
+    EXPECT_EQ(expired.record_ts, 10U);
+    EXPECT_EQ(expired.ttl, 999U);
+
+    ExpiredTtlDeleteCheck live = CheckExpiredTtlDeleteCandidate(
+        EloqValueCodec::EncodeValue("live", 11, 1000), now_ms);
+    EXPECT_EQ(live.decision, ExpiredTtlDeleteDecision::Skip);
+    EXPECT_EQ(live.record_ts, 11U);
+    EXPECT_EQ(live.ttl, 1000U);
+
+    ExpiredTtlDeleteCheck no_ttl = CheckExpiredTtlDeleteCandidate(
+        EloqValueCodec::EncodeValue("forever", 12, 0), now_ms);
+    EXPECT_EQ(no_ttl.decision, ExpiredTtlDeleteDecision::Skip);
+
+    ExpiredTtlDeleteCheck malformed =
+        CheckExpiredTtlDeleteCandidate("short", now_ms);
+    EXPECT_EQ(malformed.decision, ExpiredTtlDeleteDecision::Malformed);
+
+    ExpiredTtlDeleteCheck truncated_ttl =
+        CheckExpiredTtlDeleteCandidate(TruncatedTtlValue(), now_ms);
+    EXPECT_EQ(truncated_ttl.decision, ExpiredTtlDeleteDecision::Malformed);
+}
+
 TEST(TikvExpiredTtlCleanupTest, CandidateLimitStopsWithoutSkippingRest)
 {
     const std::string prefix = BuildExpiredTtlPartitionPrefix("db.table", 3);
