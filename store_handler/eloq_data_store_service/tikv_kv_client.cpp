@@ -457,6 +457,21 @@ bool TikvKvClient::DeleteRange(const std::string &start_key,
     }
 }
 
+void TikvKvClient::SetRegionErrorInjectorForTest(
+    pingcap::kv::RegionErrorInjector injector)
+{
+    EnsureInitialized();
+    cluster_->setRegionErrorInjector(std::move(injector));
+}
+
+void TikvKvClient::ClearRegionErrorInjectorForTest()
+{
+    if (cluster_ != nullptr)
+    {
+        cluster_->clearRegionErrorInjector();
+    }
+}
+
 std::string TikvKvClient::EncodeKey(const std::string &key) const
 {
     if (config_.key_prefix_.empty())

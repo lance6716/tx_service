@@ -7,18 +7,22 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "internal_request.h"
 #include "eloq_value_codec.h"
+#include "meter.h"
 #include "tikv_data_store.h"
+#include "tx_service_metrics.h"
 
 namespace EloqDS
 {
@@ -194,6 +198,160 @@ struct SnapshotLookupResult
     std::string payload;
     uint64_t commit_ts{0};
 };
+
+class RecordingMetricsRegistry : public metrics::MetricsRegistry
+{
+public:
+    struct RegisteredMetric
+    {
+        std::string name;
+        metrics::Type type;
+        metrics::Labels labels;
+    };
+
+    struct CollectedMetric
+    {
+        RegisteredMetric metric;
+        metrics::Value value;
+    };
+
+    metrics::MetricsErrors Open() override
+    {
+        return metrics::MetricsErrors::Success;
+    }
+
+    metrics::MetricHandle Register(const metrics::Name &name,
+                                   metrics::Type type,
+                                   const metrics::Labels &labels) override
+    {
+        const metrics::MetricKey key = next_key_++;
+        registered_.emplace(
+            key, RegisteredMetric{name.GetName(), type, labels});
+        return metrics::MetricHandle(key, type);
+    }
+
+    void Collect(const metrics::MetricHandle &handle,
+                 const metrics::Value &value) override
+    {
+        auto iter = registered_.find(handle.key);
+        ASSERT_TRUE(iter != registered_.end());
+        collected_.push_back(CollectedMetric{iter->second, value});
+    }
+
+    size_t CountBackoffMetrics(std::string_view operation,
+                               std::string_view type,
+                               std::string_view max_sleep_exceeded) const
+    {
+        size_t count = 0;
+        for (const CollectedMetric &collected : collected_)
+        {
+            if (collected.metric.name !=
+                metrics::NAME_KV_TIKV_BACKOFF_TOTAL.GetName())
+            {
+                continue;
+            }
+            if (HasLabel(collected.metric.labels, "operation", operation) &&
+                HasLabel(collected.metric.labels, "type", type) &&
+                HasLabel(collected.metric.labels,
+                         "max_sleep_exceeded",
+                         max_sleep_exceeded))
+            {
+                ++count;
+            }
+        }
+        return count;
+    }
+
+private:
+    static bool HasLabel(const metrics::Labels &labels,
+                         std::string_view key,
+                         std::string_view value)
+    {
+        for (const auto &[label_key, label_value] : labels)
+        {
+            if (label_key == key && label_value == value)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    metrics::MetricKey next_key_{1};
+    std::unordered_map<metrics::MetricKey, RegisteredMetric> registered_;
+    std::vector<CollectedMetric> collected_;
+};
+
+class ScopedKvMetricsRecorder
+{
+public:
+    ScopedKvMetricsRecorder()
+        : saved_enable_kv_metrics_(metrics::enable_kv_metrics),
+          saved_kv_meter_(std::move(metrics::kv_meter))
+    {
+        metrics::enable_kv_metrics = true;
+        metrics::kv_meter =
+            std::make_unique<metrics::Meter>(&registry_,
+                                             metrics::CommonLabels{});
+        metrics::kv_meter->Register(metrics::NAME_KV_READ_TOTAL,
+                                    metrics::Type::Counter);
+        metrics::kv_meter->Register(metrics::NAME_KV_READ_DURATION,
+                                    metrics::Type::Histogram);
+        metrics::kv_meter->Register(
+            metrics::NAME_KV_TIKV_BACKOFF_TOTAL,
+            metrics::Type::Counter,
+            {{"operation",
+              {"read",
+               "write",
+               "delete_keys",
+               "scan",
+               "range_delete",
+               "unknown"}},
+             {"type",
+              {"tikv_rpc",
+               "txn_lock",
+               "txn_lock_fast",
+               "pd_rpc",
+               "region_miss",
+               "region_scheduling",
+               "server_busy",
+               "tikv_disk_full",
+               "txn_not_found",
+               "max_ts_not_synced",
+               "max_data_not_ready",
+               "max_region_not_initialized",
+               "tiflash_rpc",
+               "unknown"}},
+             {"max_sleep_exceeded", {"false", "true"}}});
+    }
+
+    ScopedKvMetricsRecorder(const ScopedKvMetricsRecorder &) = delete;
+    ScopedKvMetricsRecorder &operator=(const ScopedKvMetricsRecorder &) =
+        delete;
+
+    ~ScopedKvMetricsRecorder()
+    {
+        metrics::kv_meter = std::move(saved_kv_meter_);
+        metrics::enable_kv_metrics = saved_enable_kv_metrics_;
+    }
+
+    const RecordingMetricsRegistry &Registry() const
+    {
+        return registry_;
+    }
+
+private:
+    bool saved_enable_kv_metrics_{false};
+    std::unique_ptr<metrics::Meter> saved_kv_meter_;
+    RecordingMetricsRegistry registry_;
+};
+
+errorpb::Error MakeEpochNotMatchRegionError()
+{
+    errorpb::Error error;
+    error.mutable_epoch_not_match();
+    return error;
+}
 
 class TestWriteRequest : public WriteRecordsRequest
 {
@@ -518,6 +676,39 @@ protected:
         }
     }
 
+    void ExpectReadAfterInjectedRegionError(
+        std::string_view case_name,
+        const std::function<pingcap::kv::RegionErrorInjection()> &make_injection)
+    {
+        int injector_calls = 0;
+        store_->SetRegionErrorInjectorForTest(
+            [&](const pingcap::kv::RegionErrorInjectionContext &context) {
+                ++injector_calls;
+                EXPECT_STREQ(context.rpc_name, "KvGet Failed");
+                EXPECT_EQ(context.store_type, pingcap::kv::StoreType::TiKV);
+                EXPECT_FALSE(context.is_stream);
+
+                if (injector_calls == 1)
+                {
+                    return make_injection();
+                }
+                return pingcap::kv::RegionErrorInjection::none();
+            });
+
+        ScopedKvMetricsRecorder metrics_recorder;
+        TestReadRequest read_req("read_fault_injection",
+                                 31,
+                                 std::string(case_name));
+        store_->Read(&read_req);
+        store_->ClearRegionErrorInjectorForTest();
+
+        EXPECT_EQ(read_req.error_, DataStoreError::KEY_NOT_FOUND);
+        EXPECT_GE(injector_calls, 1);
+        EXPECT_GE(metrics_recorder.Registry().CountBackoffMetrics(
+                      "read", "region_miss", "false"),
+                  1U);
+    }
+
     SnapshotLookupResult SnapshotRecordAt(std::string_view base_table,
                                           int32_t base_partition,
                                           std::string_view key,
@@ -678,6 +869,23 @@ TEST(TikvBackendFaultInjectionSmokeTest, EmptyPdEndpointsFailFast)
     TestReadRequest read_req("unavailable", 1, "k");
     bad_store.Read(&read_req);
     EXPECT_EQ(read_req.error_, DataStoreError::DB_NOT_OPEN);
+}
+
+TEST_F(TikvBackendSmokeTest,
+       ReadPathRegionErrorInjectionRecordsReadBackoffMetrics)
+{
+    ExpectReadAfterInjectedRegionError("region-miss", [] {
+        return pingcap::kv::RegionErrorInjection::regionMiss(
+            "injected read region miss");
+    });
+    ExpectReadAfterInjectedRegionError("epoch-not-match", [] {
+        return pingcap::kv::RegionErrorInjection::regionError(
+            MakeEpochNotMatchRegionError());
+    });
+    ExpectReadAfterInjectedRegionError("store-unavailable", [] {
+        return pingcap::kv::RegionErrorInjection::storeUnavailable(
+            "injected read unavailable store");
+    });
 }
 
 TEST_F(TikvBackendSmokeTest, PutReadDeleteRangeDropAndNoOpSemantics)

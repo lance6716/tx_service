@@ -73,6 +73,10 @@ public:
 
     void SwitchToReadWrite() override;
 
+    void SetRegionErrorInjectorForTest(
+        pingcap::kv::RegionErrorInjector injector);
+    void ClearRegionErrorInjectorForTest();
+
     ExpiredTtlCandidateScanBatch ScanExpiredBaseTtlCandidates(
         std::string_view table_name,
         int32_t partition_id,

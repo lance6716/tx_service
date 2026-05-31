@@ -132,6 +132,10 @@ public:
     KvScanResult Scan(const KvScanOptions &options);
     bool DeleteRange(const std::string &start_key, const std::string &end_key);
 
+    void SetRegionErrorInjectorForTest(
+        pingcap::kv::RegionErrorInjector injector);
+    void ClearRegionErrorInjectorForTest();
+
 private:
     std::string EncodeKey(const std::string &key) const;
     std::string StripKeyPrefix(const std::string &key) const;

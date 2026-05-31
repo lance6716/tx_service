@@ -1223,6 +1223,17 @@ void TikvDataStore::SwitchToReadWrite()
     // No local TiKV backend state needs to be resumed.
 }
 
+void TikvDataStore::SetRegionErrorInjectorForTest(
+    pingcap::kv::RegionErrorInjector injector)
+{
+    kv_client_.SetRegionErrorInjectorForTest(std::move(injector));
+}
+
+void TikvDataStore::ClearRegionErrorInjectorForTest()
+{
+    kv_client_.ClearRegionErrorInjectorForTest();
+}
+
 std::string TikvDataStore::BuildKeyPrefix(std::string_view table_name,
                                           int32_t partition_id)
 {
