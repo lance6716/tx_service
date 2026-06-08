@@ -155,4 +155,6 @@ ADD_LIBRARY(logservice
     )
 
 target_include_directories(logservice PUBLIC ${LOG_INCLUDE_DIR})
+target_compile_options(logservice PUBLIC
+    "$<$<COMPILE_LANGUAGE:CXX>:-include;gflags/gflags.h>")
 target_link_libraries(logservice PUBLIC ${LOG_LIB} ${PROTOBUF_LIBRARIES})

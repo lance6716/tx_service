@@ -130,7 +130,9 @@ if(BUILD_SHARED_LIBS)
 else()
     set(ABSL_ENABLE_INSTALL OFF CACHE INTERNAL "Install Abseil libs" FORCE)
 endif()
-add_subdirectory(tx_service/abseil-cpp)
+if(NOT TARGET absl::base)
+    add_subdirectory(tx_service/abseil-cpp)
+endif()
 
 message(${TX_SERVICE_SOURCE_DIR})
 set(INCLUDE_DIR

@@ -143,6 +143,18 @@ elseif(WITH_DATA_STORE STREQUAL "ELOQDSS_TIKV")
         message(FATAL_ERROR "WITH_DATA_STORE=ELOQDSS_TIKV requires TIKV_CLIENT_C_ROOT to point at a tikv/client-c checkout")
     endif()
     if(NOT TARGET kv_client)
+        # Both tx_service and tikv-client-c vendor Abseil and export the same
+        # absl::* target names. Add Abseil once before embedding tikv-client-c,
+        # then tell tikv-client-c not to add its second copy.
+        if(NOT TARGET absl::base)
+            if(BUILD_SHARED_LIBS)
+                set(ABSL_ENABLE_INSTALL ON CACHE INTERNAL "Install Abseil libs" FORCE)
+            else()
+                set(ABSL_ENABLE_INSTALL OFF CACHE INTERNAL "Install Abseil libs" FORCE)
+            endif()
+            add_subdirectory(tx_service/abseil-cpp "${CMAKE_BINARY_DIR}/tx_service-abseil" EXCLUDE_FROM_ALL)
+        endif()
+        set(ABSL_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tx_service/abseil-cpp" CACHE PATH "Shared Abseil source used by tx_service and tikv-client-c" FORCE)
         set(ENABLE_TESTS OFF CACHE BOOL "Disable tikv-client-c tests when embedded in EloqDoc" FORCE)
         add_subdirectory("${TIKV_CLIENT_C_ROOT}" "${CMAKE_BINARY_DIR}/tikv-client-c" EXCLUDE_FROM_ALL)
     endif()
