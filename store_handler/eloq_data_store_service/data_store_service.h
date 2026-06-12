@@ -431,6 +431,7 @@ public:
                   const std::vector<remote::SearchCondition> *search_conditions,
                   std::vector<ScanTuple> *items,
                   std::string *session_id,
+                  std::string *cursor,
                   bool generate_session_id,
                   ::EloqDS::remote::CommonResult *result,
                   ::google::protobuf::Closure *done);

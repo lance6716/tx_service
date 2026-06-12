@@ -200,7 +200,11 @@ class SinglePartitionScanner : public Poolable
 {
 public:
     SinglePartitionScanner()
-        : scanner_(nullptr), partition_id_(0), last_key_(""), session_id_("")
+        : scanner_(nullptr),
+          partition_id_(0),
+          last_key_(""),
+          session_id_(""),
+          cursor_("")
     {
     }
 
@@ -214,6 +218,7 @@ public:
         data_shard_id_ = data_shard_id;
         last_key_ = start_key;
         session_id_ = "";
+        cursor_ = "";
         last_batch_size_ = scanner_->GetBatchSize();
         first_batch_fetched_ = false;
         head_ = 0;
@@ -252,6 +257,7 @@ protected:
         data_shard_id_ = 0;
         last_key_ = "";
         session_id_ = "";
+        cursor_ = "";
         last_batch_size_ = 0;
         first_batch_fetched_ = false;
         head_ = 0;
@@ -267,6 +273,7 @@ private:
     std::string last_key_;
     uint32_t last_batch_size_;
     std::string session_id_;
+    std::string cursor_;
     // indicate if the first batch is fetched
     bool first_batch_fetched_{false};
     size_t head_{0};

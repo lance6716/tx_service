@@ -77,7 +77,8 @@ bool SinglePartitionScanner::FetchNextBatch()
         // scanner_->SearchConditions(),
         nullptr,
         this,
-        ProcessScanNextResult);
+        ProcessScanNextResult,
+        cursor_);
 
     first_batch_fetched_ = true;
 
@@ -142,6 +143,7 @@ void SinglePartitionScanner::ProcessScanNextResult(
     uint32_t items_size = scan_next_closure->ItemsSize();
     sp_scanner->last_batch_size_ = items_size;
     sp_scanner->session_id_ = scan_next_closure->GetSessionId();
+    sp_scanner->cursor_ = std::string(scan_next_closure->GetCursor());
 
     uint64_t now = txservice::LocalCcShards::ClockTsInMillseconds();
     for (uint32_t i = 0; i < items_size; i++)

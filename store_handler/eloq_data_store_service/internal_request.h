@@ -1180,6 +1180,12 @@ public:
 
     virtual const std::string &GetSessionId() = 0;
 
+    virtual void SetCursor(const std::string &cursor) = 0;
+
+    virtual void ClearCursor() = 0;
+
+    virtual const std::string &GetCursor() = 0;
+
     // finish
     virtual void SetFinish(const ::EloqDS::remote::DataStoreError error_code,
                            const std::string error_message = "") = 0;
@@ -1305,6 +1311,21 @@ public:
         return req_->generate_session_id();
     }
 
+    void SetCursor(const std::string &cursor) override
+    {
+        resp_->set_cursor(cursor);
+    }
+
+    void ClearCursor() override
+    {
+        resp_->clear_cursor();
+    }
+
+    const std::string &GetCursor() override
+    {
+        return req_->cursor();
+    }
+
     void SetFinish(const ::EloqDS::remote::DataStoreError error_code,
                    const std::string error_message) override
     {
@@ -1342,6 +1363,7 @@ public:
                const std::vector<remote::SearchCondition> *search_conditions,
                std::vector<ScanTuple> *items,
                std::string *session_id,
+               std::string *cursor,
                bool generate_session_id,
                ::EloqDS::remote::CommonResult *result,
                google::protobuf::Closure *done)
@@ -1359,6 +1381,7 @@ public:
         search_conditions_ = search_conditions;
         items_ = items;
         session_id_ = session_id;
+        cursor_ = cursor;
         generate_session_id_ = generate_session_id;
         result_ = result;
         done_ = done;
@@ -1398,6 +1421,7 @@ public:
         search_conditions_ = nullptr;
         items_ = nullptr;
         session_id_ = nullptr;
+        cursor_ = nullptr;
         generate_session_id_ = true;
         result_ = nullptr;
         done_ = nullptr;
@@ -1490,6 +1514,28 @@ public:
         return generate_session_id_;
     }
 
+    void SetCursor(const std::string &cursor) override
+    {
+        if (cursor_ != nullptr)
+        {
+            cursor_->assign(cursor);
+        }
+    }
+
+    void ClearCursor() override
+    {
+        if (cursor_ != nullptr)
+        {
+            cursor_->clear();
+        }
+    }
+
+    const std::string &GetCursor() override
+    {
+        assert(cursor_ != nullptr);
+        return *cursor_;
+    }
+
     void SetFinish(const ::EloqDS::remote::DataStoreError error_code,
                    const std::string error_message) override
     {
@@ -1512,6 +1558,7 @@ private:
     const std::vector<remote::SearchCondition> *search_conditions_{nullptr};
     std::vector<ScanTuple> *items_{nullptr};
     std::string *session_id_{nullptr};
+    std::string *cursor_{nullptr};
     bool generate_session_id_{true};
     EloqDS::remote::CommonResult *result_{nullptr};
     google::protobuf::Closure *done_{nullptr};

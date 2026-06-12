@@ -320,6 +320,7 @@ message ScanRequest {
   repeated SearchCondition search_conditions = 10;
   bool generate_session_id = 11;
   uint32 shard_id = 12;
+  bytes cursor = 13;
 }
 
 // Response message for scan operations
@@ -335,6 +336,7 @@ message ScanResponse {
   CommonResult result = 1;
   repeated Item items = 2;
   string session_id = 3;
+  bytes cursor = 4;
 }
 
 message CreateSnapshotForBackupRequest {

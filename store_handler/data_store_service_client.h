@@ -770,7 +770,8 @@ private:
         uint32_t batch_size,
         const std::vector<txservice::DataStoreSearchCond> *search_conditions,
         void *callback_data,
-        DataStoreCallback callback);
+        DataStoreCallback callback,
+        const std::string_view cursor = "");
 
     void ScanNextInternal(ScanNextClosure *scan_next_closure);
 
