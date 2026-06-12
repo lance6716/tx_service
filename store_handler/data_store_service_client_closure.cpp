@@ -296,6 +296,8 @@ void FetchBucketDataCallback(void *data,
     else
     {
         fetch_bucket_data_cc->is_drained_ = false;
+        fetch_bucket_data_cc->kv_cursor_ =
+            std::string(scan_next_closure->GetCursor());
         if (fetch_bucket_data_cc->bucket_data_items_.empty())
         {
             int32_t partition_id =
@@ -318,7 +320,8 @@ void FetchBucketDataCallback(void *data,
                             fetch_bucket_data_cc->batch_size_,
                             fetch_bucket_data_cc->pushdown_cond_,
                             fetch_bucket_data_cc,
-                            &FetchBucketDataCallback);
+                            &FetchBucketDataCallback,
+                            fetch_bucket_data_cc->kv_cursor_);
             return;
         }
     }
@@ -715,6 +718,7 @@ void FetchAllDatabaseCallback(void *data,
         {
             // has more data, continue to scan.
             fetch_data->session_id_ = scan_next_closure->SessionId();
+            fetch_data->cursor_ = std::string(scan_next_closure->GetCursor());
             client.ScanNext(kv_database_catalogs_name,
                             0,
                             scan_next_closure->ShardId(),
@@ -728,7 +732,8 @@ void FetchAllDatabaseCallback(void *data,
                             scan_next_closure->BatchSize(),
                             nullptr,
                             fetch_data,
-                            &FetchAllDatabaseCallback);
+                            &FetchAllDatabaseCallback,
+                            fetch_data->cursor_);
         }
     }
 }
@@ -789,6 +794,7 @@ void DiscoverAllTableNamesCallback(void *data,
         {
             // has more data, continue to scan.
             fetch_data->session_id_ = scan_next_closure->SessionId();
+            fetch_data->cursor_ = std::string(scan_next_closure->GetCursor());
             client.ScanNext(kv_table_catalogs_name,
                             0,
                             scan_next_closure->ShardId(),
@@ -802,7 +808,8 @@ void DiscoverAllTableNamesCallback(void *data,
                             scan_next_closure->BatchSize(),
                             nullptr,
                             fetch_data,
-                            &DiscoverAllTableNamesCallback);
+                            &DiscoverAllTableNamesCallback,
+                            fetch_data->cursor_);
         }
     }
 }
@@ -975,6 +982,7 @@ void FetchTableRangesCallback(void *data,
                 fetch_range_cc->partition_scan_states_.at(kv_part_id);
 
             scan_state.kv_session_id_ = scan_next_closure->SessionId();
+            scan_state.kv_cursor_ = std::string(scan_next_closure->GetCursor());
             scan_state.kv_start_key_.clear();
             scan_state.kv_start_key_.append(key);
 
@@ -991,7 +999,8 @@ void FetchTableRangesCallback(void *data,
                             100,
                             nullptr,
                             fetch_range_cc,
-                            &FetchTableRangesCallback);
+                            &FetchTableRangesCallback,
+                            scan_state.kv_cursor_);
         }
     }
 }
@@ -1293,6 +1302,7 @@ void FetchTableStatsCallback(void *data,
         uint64_t ttl;
         uint32_t items_size = scan_next_closure->ItemsSize();
         fetch_cc->kv_session_id_ = scan_next_closure->SessionId();
+        fetch_cc->kv_cursor_ = std::string(scan_next_closure->GetCursor());
         assert(items_size <= 1);
         if (items_size == 1)
         {
@@ -1357,7 +1367,8 @@ void FetchTableStatsCallback(void *data,
                             1,
                             nullptr,
                             fetch_cc,
-                            &FetchTableStatsCallback);
+                            &FetchTableStatsCallback,
+                            fetch_cc->kv_cursor_);
         }
         else
         {
@@ -1476,6 +1487,8 @@ void LoadRangeSliceCallback(void *data,
     }
 
     fill_store_slice_req->kv_session_id_ = scan_next_closure->GetSessionId();
+    fill_store_slice_req->kv_cursor_ =
+        std::string(scan_next_closure->GetCursor());
     if (scan_next_closure->ItemsSize() == 1000)
     {
         // has more data, continue to scan.
@@ -1492,7 +1505,8 @@ void LoadRangeSliceCallback(void *data,
                         1000,
                         nullptr,
                         fill_store_slice_req,
-                        &LoadRangeSliceCallback);
+                        &LoadRangeSliceCallback,
+                        fill_store_slice_req->kv_cursor_);
     }
     else
     {
@@ -1548,12 +1562,14 @@ void FetchArchivesCallback(void *data,
     }
     else
     {
+        fetch_data->session_id_ = scan_next_closure->SessionId();
+        fetch_data->cursor_ = std::string(scan_next_closure->GetCursor());
         client.ScanNext(fetch_data->kv_table_name_,
                         fetch_data->partition_id_,
                         scan_next_closure->ShardId(),
                         fetch_data->start_key_,
                         fetch_data->end_key_,
-                        scan_next_closure->SessionId(),
+                        fetch_data->session_id_,
                         true,
                         false,
                         false,
@@ -1561,7 +1577,8 @@ void FetchArchivesCallback(void *data,
                         fetch_data->batch_size_,
                         nullptr,
                         fetch_data,
-                        &FetchArchivesCallback);
+                        &FetchArchivesCallback,
+                        fetch_data->cursor_);
     }
 }
 
@@ -1656,6 +1673,7 @@ void FetchRecordArchivesCallback(void *data,
                                     EloqShare::host_to_big_endian(UINT64_MAX));
 
         fetch_cc->kv_session_id_.clear();
+        fetch_cc->kv_cursor_.clear();
 
         client.ScanNext(kv_mvcc_archive_name,
                         fetch_cc->partition_id_,
@@ -1670,7 +1688,8 @@ void FetchRecordArchivesCallback(void *data,
                         100,
                         nullptr,
                         fetch_cc,
-                        &FetchRecordArchivesCallback);
+                        &FetchRecordArchivesCallback,
+                        fetch_cc->kv_cursor_);
     }
     else if (items_size < scan_next_closure->BatchSize())
     {
@@ -1682,6 +1701,7 @@ void FetchRecordArchivesCallback(void *data,
         // set the start key of next scan batch
         fetch_cc->kv_start_key_ = std::move(archive_key);
         fetch_cc->kv_session_id_ = scan_next_closure->SessionId();
+        fetch_cc->kv_cursor_ = std::string(scan_next_closure->GetCursor());
 
         client.ScanNext(kv_mvcc_archive_name,
                         fetch_cc->partition_id_,
@@ -1696,7 +1716,8 @@ void FetchRecordArchivesCallback(void *data,
                         100,
                         nullptr,
                         fetch_cc,
-                        &FetchRecordArchivesCallback);
+                        &FetchRecordArchivesCallback,
+                        fetch_cc->kv_cursor_);
     }
 }
 

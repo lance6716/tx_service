@@ -737,6 +737,7 @@ void DataStoreServiceClient::FetchTableStatistics(
     fetch_cc->kv_start_key_.clear();
     fetch_cc->kv_end_key_.clear();
     fetch_cc->kv_session_id_.clear();
+    fetch_cc->kv_cursor_.clear();
 
     uint64_t version = fetch_cc->CurrentVersion();
     uint64_t be_version = EloqShare::host_to_big_endian(version);
@@ -765,7 +766,8 @@ void DataStoreServiceClient::FetchTableStatistics(
              1,
              nullptr,
              fetch_cc,
-             &FetchTableStatsCallback);
+             &FetchTableStatsCallback,
+             fetch_cc->kv_cursor_);
 }
 
 // Each node group contains a sample pool, when write them to storage,
@@ -1048,6 +1050,7 @@ void DataStoreServiceClient::FetchTableRanges(
         scan_state.kv_end_key_ = scan_state.kv_start_key_;
         scan_state.kv_end_key_.back()++;
         scan_state.kv_session_id_.clear();
+        scan_state.kv_cursor_.clear();
 
         uint32_t data_shard_id = GetShardIdByPartitionId(kv_part_id, false);
 
@@ -1064,7 +1067,8 @@ void DataStoreServiceClient::FetchTableRanges(
                  100,
                  nullptr,
                  fetch_cc,
-                 &FetchTableRangesCallback);
+                 &FetchTableRangesCallback,
+                 scan_state.kv_cursor_);
     }
 }
 
@@ -1282,6 +1286,7 @@ DataStoreServiceClient::LoadRangeSlice(
     uint32_t data_shard_id =
         GetShardIdByPartitionId(load_slice_req->kv_partition_id_, true);
     load_slice_req->kv_session_id_.clear();
+    load_slice_req->kv_cursor_.clear();
 
     ScanNext(*load_slice_req->kv_table_name_,
              load_slice_req->kv_partition_id_,
@@ -1296,7 +1301,8 @@ DataStoreServiceClient::LoadRangeSlice(
              1000,     // batch size
              nullptr,  // search condition
              load_slice_req,
-             &LoadRangeSliceCallback);
+             &LoadRangeSliceCallback,
+             load_slice_req->kv_cursor_);
 
     return txservice::store::DataStoreHandler::DataStoreOpStatus::Success;
 }
@@ -2364,7 +2370,8 @@ bool DataStoreServiceClient::DiscoverAllTableNames(
              10,
              nullptr,
              callback_data,
-             &DiscoverAllTableNamesCallback);
+             &DiscoverAllTableNamesCallback,
+             callback_data->cursor_);
     callback_data->Wait();
 
     return !callback_data->HasError();
@@ -2571,7 +2578,8 @@ bool DataStoreServiceClient::FetchAllDatabase(
              100,
              nullptr,
              callback_data,
-             &FetchAllDatabaseCallback);
+             &FetchAllDatabaseCallback,
+             callback_data->cursor_);
     callback_data->Wait();
 
     return !callback_data->HasError();
@@ -3446,7 +3454,8 @@ bool DataStoreServiceClient::FetchArchives(
              batch_size,
              nullptr,  // search_condition
              &callback_data,
-             &FetchArchivesCallback);
+             &FetchArchivesCallback,
+             callback_data.cursor_);
     callback_data.Wait();
 
     if (callback_data.HasError())
@@ -3558,7 +3567,8 @@ bool DataStoreServiceClient::FetchVisibleArchive(
              batch_size,
              nullptr,  // search condition
              &callback_data,
-             &FetchArchivesCallback);
+             &FetchArchivesCallback,
+             callback_data.cursor_);
     callback_data.Wait();
 
     if (callback_data.HasError())
@@ -3636,6 +3646,7 @@ DataStoreServiceClient::FetchArchives(txservice::FetchRecordCc *fetch_cc)
     uint32_t data_shard_id =
         GetShardIdByPartitionId(fetch_cc->partition_id_, false);
     fetch_cc->kv_session_id_.clear();
+    fetch_cc->kv_cursor_.clear();
 
     ScanNext(kv_mvcc_archive_name,
              fetch_cc->partition_id_,
@@ -3650,7 +3661,8 @@ DataStoreServiceClient::FetchArchives(txservice::FetchRecordCc *fetch_cc)
              1,
              nullptr,  // search condition
              fetch_cc,
-             &FetchRecordArchivesCallback);
+             &FetchRecordArchivesCallback,
+             fetch_cc->kv_cursor_);
     return txservice::store::DataStoreHandler::DataStoreOpStatus::Success;
 }
 
@@ -4527,6 +4539,7 @@ DataStoreServiceClient::FetchBucketData(
 
     fetch_bucket_data_cc->kv_start_key_.clear();
     fetch_bucket_data_cc->kv_end_key_.clear();
+    fetch_bucket_data_cc->kv_cursor_.clear();
 
     if (fetch_bucket_data_cc->start_key_type_ !=
         txservice::KeyType::NegativeInf)
@@ -4556,7 +4569,8 @@ DataStoreServiceClient::FetchBucketData(
              fetch_bucket_data_cc->batch_size_,
              fetch_bucket_data_cc->pushdown_cond_,
              fetch_bucket_data_cc,
-             &FetchBucketDataCallback);
+             &FetchBucketDataCallback,
+             fetch_bucket_data_cc->kv_cursor_);
 
     return txservice::store::DataStoreHandler::DataStoreOpStatus::Success;
 }
@@ -4800,7 +4814,8 @@ void DataStoreServiceClient::ScanNext(
     uint32_t batch_size,
     const std::vector<txservice::DataStoreSearchCond> *search_conditions,
     void *callback_data,
-    DataStoreCallback callback)
+    DataStoreCallback callback,
+    const std::string_view cursor)
 {
     ScanNextClosure *closure = scan_next_closure_pool_.NextObject();
     closure->Reset(*this,
@@ -4817,7 +4832,8 @@ void DataStoreServiceClient::ScanNext(
                    batch_size,
                    search_conditions,
                    callback_data,
-                   callback);
+                   callback,
+                   cursor);
     ScanNextInternal(closure);
 }
 
@@ -4840,6 +4856,7 @@ void DataStoreServiceClient::ScanNextInternal(
             scan_next_closure->LocalSearchConditionsPtr(),
             &scan_next_closure->LocalItemsRef(),
             &scan_next_closure->LocalSessionIdRef(),
+            &scan_next_closure->LocalCursorRef(),
             scan_next_closure->GenerateSessionId(),
             &scan_next_closure->Result(),
             scan_next_closure);
@@ -4883,7 +4900,8 @@ void DataStoreServiceClient::ScanClose(const std::string_view table_name,
                    0,  // batch_size 0 for close
                    nullptr,
                    callback_data,
-                   callback);
+                   callback,
+                   "");
     ScanCloseInternal(closure);
 }
 

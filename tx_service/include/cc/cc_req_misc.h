@@ -209,6 +209,7 @@ public:
     std::string kv_start_key_;
     std::string kv_end_key_;
     std::string kv_session_id_;
+    std::string kv_cursor_;
     int32_t kv_partition_id_{0};
 };
 
@@ -235,6 +236,7 @@ public:
         std::string kv_start_key_;
         std::string kv_end_key_;
         std::string kv_session_id_;
+        std::string kv_cursor_;
     };
 
     const TableName table_name_;
@@ -559,6 +561,7 @@ public:
     std::string_view kv_start_key_;
     std::string_view kv_end_key_;
     std::string kv_session_id_;
+    std::string kv_cursor_;
     int32_t kv_partition_id_{0};
 };
 
@@ -610,6 +613,7 @@ public:
 
     // These variables only be used in DataStoreHandler
     std::string kv_session_id_;
+    std::string kv_cursor_;
     std::string kv_start_key_;
     std::string kv_end_key_;
 };
@@ -707,6 +711,7 @@ public:
 
     std::string kv_start_key_;
     std::string kv_end_key_;
+    std::string kv_cursor_;
 };
 
 struct UpdateRangeSlicesReq

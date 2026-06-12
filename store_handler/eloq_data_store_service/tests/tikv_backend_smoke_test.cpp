@@ -543,8 +543,10 @@ public:
                     bool scan_forward,
                     uint32_t batch_size,
                     std::string session_id = "",
-                    bool generate_session_id = true)
+                    bool generate_session_id = true,
+                    std::string cursor = "")
         : session_id_(std::move(session_id)),
+          cursor_(std::move(cursor)),
           table_(std::move(table)),
           partition_(partition),
           start_key_(std::move(start_key)),
@@ -587,6 +589,12 @@ public:
     bool GenerateSessionId() const override { return generate_session_id_; }
     void ClearSessionId() override { session_id_.clear(); }
     const std::string &GetSessionId() override { return session_id_; }
+    void SetCursor(const std::string &cursor) override
+    {
+        cursor_ = cursor;
+    }
+    void ClearCursor() override { cursor_.clear(); }
+    const std::string &GetCursor() override { return cursor_; }
     void SetFinish(DataStoreError error_code, const std::string error_message) override
     {
         error_ = error_code;
@@ -605,6 +613,7 @@ public:
     std::string error_message_;
     std::vector<Item> items_;
     std::string session_id_;
+    std::string cursor_;
 
 private:
     std::string table_;
@@ -745,7 +754,7 @@ protected:
         uint64_t snapshot_ts)
     {
         std::map<std::string, SnapshotLookupResult> visible;
-        std::string session_id;
+        std::string cursor;
         do
         {
             TestScanRequest req(std::string(base_table),
@@ -756,7 +765,9 @@ protected:
                                 false,
                                 true,
                                 2,
-                                session_id);
+                                "",
+                                true,
+                                cursor);
             store_->ScanNext(&req);
             EXPECT_EQ(req.error_, DataStoreError::NO_ERROR)
                 << req.error_message_;
@@ -789,8 +800,8 @@ protected:
                     visible.emplace(item.key, std::move(result));
                 }
             }
-            session_id = req.session_id_;
-        } while (!session_id.empty());
+            cursor = req.cursor_;
+        } while (!cursor.empty());
 
         return visible;
     }
@@ -869,6 +880,21 @@ TEST(TikvBackendFaultInjectionSmokeTest, EmptyPdEndpointsFailFast)
     TestReadRequest read_req("unavailable", 1, "k");
     bad_store.Read(&read_req);
     EXPECT_EQ(read_req.error_, DataStoreError::DB_NOT_OPEN);
+}
+
+TEST(TikvBackendProtoTest, ScanCursorCarriesBinaryBytes)
+{
+    remote::ScanResponse response;
+    const std::string binary_cursor("physical\xff\0cursor", 16);
+    response.set_cursor(binary_cursor);
+
+    std::string payload;
+    ASSERT_TRUE(response.SerializeToString(&payload));
+
+    remote::ScanResponse parsed;
+    ASSERT_TRUE(parsed.ParseFromString(payload));
+    EXPECT_TRUE(parsed.session_id().empty());
+    EXPECT_EQ(parsed.cursor(), binary_cursor);
 }
 
 TEST_F(TikvBackendSmokeTest,
@@ -973,15 +999,18 @@ TEST_F(TikvBackendSmokeTest, ForwardReverseScanPaginationAndTypeFiltering)
     ASSERT_EQ(first_page.error_, DataStoreError::NO_ERROR) << first_page.error_message_;
     ASSERT_EQ(first_page.items_.size(), 1U);
     EXPECT_EQ(first_page.items_[0].key, "s1");
-    ASSERT_FALSE(first_page.session_id_.empty());
+    EXPECT_TRUE(first_page.session_id_.empty());
+    ASSERT_FALSE(first_page.cursor_.empty());
 
-    TestScanRequest second_page(table, 1, "", "", true, false, true, 1, first_page.session_id_);
+    TestScanRequest second_page(
+        table, 1, "", "", true, false, true, 1, "", true, first_page.cursor_);
     second_page.AddTypeCondition('\x01');
     store_->ScanNext(&second_page);
     ASSERT_EQ(second_page.error_, DataStoreError::NO_ERROR) << second_page.error_message_;
     ASSERT_EQ(second_page.items_.size(), 1U);
     EXPECT_EQ(second_page.items_[0].key, "s3");
-    if (!second_page.session_id_.empty())
+    EXPECT_TRUE(second_page.session_id_.empty());
+    if (!second_page.cursor_.empty())
     {
         TestScanRequest end_page(table,
                                  1,
@@ -991,13 +1020,16 @@ TEST_F(TikvBackendSmokeTest, ForwardReverseScanPaginationAndTypeFiltering)
                                  false,
                                  true,
                                  1,
-                                 second_page.session_id_);
+                                 "",
+                                 true,
+                                 second_page.cursor_);
         end_page.AddTypeCondition('\x01');
         store_->ScanNext(&end_page);
         ASSERT_EQ(end_page.error_, DataStoreError::NO_ERROR)
             << end_page.error_message_;
         EXPECT_TRUE(end_page.items_.empty());
         EXPECT_TRUE(end_page.session_id_.empty());
+        EXPECT_TRUE(end_page.cursor_.empty());
     }
 
     TestScanRequest reverse(table, 1, "", "", true, false, false, 10);

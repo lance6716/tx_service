@@ -549,8 +549,9 @@ void TikvDataStore::DropTable(DropTableRequest *drop_table_req)
 void TikvDataStore::ScanNext(ScanRequest *scan_req)
 {
     PoolableGuard req_guard(scan_req);
-    const std::string session_id = scan_req->GetSessionId();
+    const std::string request_cursor = scan_req->GetCursor();
     scan_req->ClearSessionId();
+    scan_req->ClearCursor();
 
     if (!kv_client_.IsInitialized())
     {
@@ -582,13 +583,9 @@ void TikvDataStore::ScanNext(ScanRequest *scan_req)
     const bool scan_forward = scan_req->ScanForward();
 
     std::string cursor;
-    if (!session_id.empty() && StartsWith(session_id, key_prefix))
+    if (!request_cursor.empty() && StartsWith(request_cursor, key_prefix))
     {
-        // TiKV scans are stateless: the response session id carries the next
-        // physical cursor. Existing callers still pass the last returned
-        // logical key, but the cursor is more precise when filters skipped
-        // keys after the last returned item.
-        cursor = session_id;
+        cursor = request_cursor;
     }
     else if (!scan_req->GetStartKey().empty())
     {
@@ -720,10 +717,9 @@ void TikvDataStore::ScanNext(ScanRequest *scan_req)
             }
         }
 
-        if (!scan_completed && scan_req->GenerateSessionId() &&
-            !cursor.empty())
+        if (!scan_completed && !cursor.empty())
         {
-            scan_req->SetSessionId(cursor);
+            scan_req->SetCursor(cursor);
         }
 
         scan_req->SetFinish(remote::DataStoreError::NO_ERROR);
@@ -743,8 +739,9 @@ void TikvDataStore::ScanClose(ScanRequest *scan_req)
     PoolableGuard req_guard(scan_req);
 
     // TiKV scans are stateless. ScanNext returns the next physical cursor in
-    // the response session id; there is no server-side iterator to release.
+    // the response cursor; there is no server-side iterator to release.
     scan_req->ClearSessionId();
+    scan_req->ClearCursor();
     scan_req->SetFinish(remote::DataStoreError::NO_ERROR);
 }
 
