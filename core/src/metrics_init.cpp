@@ -16,6 +16,9 @@
 #ifdef ELOQ_MODULE_ELOQKV
 #include "redis_metrics.h"
 #endif
+#ifdef ELOQ_MODULE_ELOQDOC
+#include "mongo_metrics.h"
+#endif
 
 DEFINE_bool(enable_metrics, false, "Enable metrics");
 DEFINE_string(metrics_port, "18081", "Metrics port");
@@ -129,6 +132,27 @@ bool DataSubstrate::InitializeMetrics(const INIReader &config_reader)
         metrics::enable_mysql_dml_metrics = config_reader.GetBoolean(
             "metrics", "enable_mysql_dml_metrics", true);
 #endif
+#ifdef ELOQ_MODULE_ELOQDOC
+        metrics::enable_mongo_metrics =
+            config_reader.GetBoolean("metrics", "enable_mongo_metrics", true);
+        LOG(INFO) << "enable_mongo_metrics: "
+                  << (metrics::enable_mongo_metrics ? "ON" : "OFF");
+        if (metrics::enable_mongo_metrics)
+        {
+            metrics::collect_mongo_command_duration_round =
+                config_reader.GetInteger(
+                    "metrics", "collect_mongo_command_duration_round", 100);
+            metrics::collect_mongo_storage_duration_round =
+                config_reader.GetInteger(
+                    "metrics", "collect_mongo_storage_duration_round", 100);
+            LOG(INFO) << "collect mongo command duration every "
+                      << metrics::collect_mongo_command_duration_round
+                      << " round(s)";
+            LOG(INFO) << "collect mongo storage duration every "
+                      << metrics::collect_mongo_storage_duration_round
+                      << " round(s)";
+        }
+#endif
         setenv("ELOQ_METRICS_PORT", FLAGS_metrics_port.c_str(), false);
         eloq_metrics_app::MetricsRegistryImpl::MetricsRegistryResult
             metrics_registry_result =
@@ -164,6 +188,19 @@ bool DataSubstrate::InitializeMetrics(const INIReader &config_reader)
                                         core_config_.core_num);
         metrics::redis_meter->Collect(metrics::NAME_MAX_CONNECTION,
                                       core_config_.maxclients);
+#endif
+#ifdef ELOQ_MODULE_ELOQDOC
+        if (metrics::enable_mongo_metrics)
+        {
+            metrics::CommonLabels mongo_common_labels{};
+            mongo_common_labels["node_ip"] = network_config_.local_ip;
+            mongo_common_labels["node_port"] =
+                std::to_string(network_config_.local_port);
+            mongo_common_labels["node_id"] =
+                std::to_string(network_config_.node_id);
+            metrics::register_mongo_metrics(metrics_registry_.get(),
+                                            mongo_common_labels);
+        }
 #endif
         tx_service_common_labels_["node_ip"] = network_config_.local_ip;
         tx_service_common_labels_["node_port"] =
