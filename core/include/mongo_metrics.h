@@ -31,8 +31,8 @@
 #include <string_view>
 #include <vector>
 
-#include "meter.h"
-#include "metrics.h"
+#include "mongo/db/modules/eloq/data_substrate/eloq_metrics/include/meter.h"
+#include "mongo/db/modules/eloq/data_substrate/eloq_metrics/include/metrics.h"
 
 namespace metrics
 {
