@@ -28,6 +28,9 @@
 #include <cassert>
 #include <chrono>
 #include <exception>
+#include <iomanip>
+#include <limits>
+#include <sstream>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -173,6 +176,99 @@ bool StripKeyPrefix(std::string_view physical_key,
 
     logical_key = physical_key.substr(physical_prefix.size());
     return true;
+}
+
+std::string ByteStringForLog(std::string_view value, size_t max_bytes = 64)
+{
+    std::ostringstream out;
+    out << "size=" << value.size() << ", hex=\"";
+    out << std::hex << std::setfill('0');
+    const size_t bytes_to_print = std::min(value.size(), max_bytes);
+    for (size_t i = 0; i < bytes_to_print; ++i)
+    {
+        out << std::setw(2)
+            << static_cast<unsigned int>(
+                   static_cast<unsigned char>(value[i]));
+    }
+    if (value.size() > max_bytes)
+    {
+        out << "...";
+    }
+    out << "\"";
+    return out.str();
+}
+
+std::string DescribeWriteRequestForLog(const WriteRecordsRequest *req)
+{
+    assert(req != nullptr);
+    std::ostringstream out;
+    out << "write_request{table=\"" << req->GetTableName()
+        << "\", partition_id=" << req->GetPartitionId()
+        << ", shard_id=" << req->GetShardId()
+        << ", records=" << req->RecordsCount()
+        << ", parts_per_key=" << req->PartsCountPerKey()
+        << ", parts_per_record=" << req->PartsCountPerRecord()
+        << ", skip_wal=" << req->SkipWal() << "}";
+    return out.str();
+}
+
+std::string DescribeMutationBatchForLog(
+    const std::vector<KvMutation> &mutations)
+{
+    size_t puts = 0;
+    size_t deletes = 0;
+    size_t total_key_bytes = 0;
+    size_t total_value_bytes = 0;
+    size_t min_key_bytes = std::numeric_limits<size_t>::max();
+    size_t max_key_bytes = 0;
+    size_t min_value_bytes = std::numeric_limits<size_t>::max();
+    size_t max_value_bytes = 0;
+
+    for (const KvMutation &mutation : mutations)
+    {
+        total_key_bytes += mutation.key.size();
+        min_key_bytes = std::min(min_key_bytes, mutation.key.size());
+        max_key_bytes = std::max(max_key_bytes, mutation.key.size());
+
+        if (mutation.op == KvMutation::Op::Put)
+        {
+            ++puts;
+            total_value_bytes += mutation.value.size();
+            min_value_bytes = std::min(min_value_bytes, mutation.value.size());
+            max_value_bytes = std::max(max_value_bytes, mutation.value.size());
+        }
+        else
+        {
+            ++deletes;
+        }
+    }
+
+    if (mutations.empty())
+    {
+        min_key_bytes = 0;
+    }
+    if (puts == 0)
+    {
+        min_value_bytes = 0;
+    }
+
+    std::ostringstream out;
+    out << "mutation_batch{count=" << mutations.size()
+        << ", puts=" << puts << ", deletes=" << deletes
+        << ", total_key_bytes=" << total_key_bytes
+        << ", total_value_bytes=" << total_value_bytes
+        << ", min_key_bytes=" << min_key_bytes
+        << ", max_key_bytes=" << max_key_bytes
+        << ", min_value_bytes=" << min_value_bytes
+        << ", max_value_bytes=" << max_value_bytes;
+    if (!mutations.empty())
+    {
+        out << ", first_key{" << ByteStringForLog(mutations.front().key)
+            << "}, last_key{" << ByteStringForLog(mutations.back().key)
+            << "}";
+    }
+    out << "}";
+    return out.str();
 }
 
 bool MatchesSearchConditions(std::string_view record, const ScanRequest *req)
@@ -387,6 +483,7 @@ void TikvDataStore::BatchWriteRecords(WriteRecordsRequest *batch_write_req)
         LOG(ERROR) << "TiKV BatchWriteRecords failed while building "
                       "mutations, table: "
                    << batch_write_req->GetTableName()
+                   << ", " << DescribeWriteRequestForLog(batch_write_req)
                    << ", error: " << e.what();
         batch_write_req->SetFinish(MakeCommonResult(
             remote::DataStoreError::WRITE_FAILED, e.what()));
@@ -395,6 +492,10 @@ void TikvDataStore::BatchWriteRecords(WriteRecordsRequest *batch_write_req)
 
     if (!kv_client_.CommitBatch(mutations))
     {
+        LOG(ERROR) << "TiKV BatchWriteRecords commit failed, "
+                   << DescribeWriteRequestForLog(batch_write_req) << ", "
+                   << DescribeMutationBatchForLog(mutations)
+                   << ", error: " << kv_client_.LastError();
         batch_write_req->SetFinish(MakeCommonResult(
             remote::DataStoreError::WRITE_FAILED, kv_client_.LastError()));
         return;

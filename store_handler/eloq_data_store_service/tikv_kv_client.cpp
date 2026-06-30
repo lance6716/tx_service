@@ -33,6 +33,9 @@
 #include <pingcap/kv/Txn.h>
 
 #include <algorithm>
+#include <iomanip>
+#include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 
@@ -47,6 +50,162 @@ bool StartsWith(const std::string &value, const std::string &prefix)
 {
     return value.size() >= prefix.size() &&
            value.compare(0, prefix.size(), prefix) == 0;
+}
+
+const char *PingcapErrorCodeName(int code)
+{
+    switch (code)
+    {
+    case 0:
+        return "OK";
+    case pingcap::MismatchClusterIDCode:
+        return "MismatchClusterID";
+    case pingcap::GRPCErrorCode:
+        return "GRPCError";
+    case pingcap::InitClusterIDFailed:
+        return "InitClusterIDFailed";
+    case pingcap::UpdatePDLeaderFailed:
+        return "UpdatePDLeaderFailed";
+    case pingcap::TimeoutError:
+        return "Timeout";
+    case pingcap::RegionUnavailable:
+        return "RegionUnavailable";
+    case pingcap::LogicalError:
+        return "LogicalError";
+    case pingcap::LockError:
+        return "LockError";
+    case pingcap::LeanerUnavailable:
+        return "LeanerUnavailable";
+    case pingcap::StoreNotReady:
+        return "StoreNotReady";
+    case pingcap::RaftEntryTooLarge:
+        return "RaftEntryTooLarge";
+    case pingcap::ServerIsBusy:
+        return "ServerIsBusy";
+    case pingcap::NotLeader:
+        return "NotLeader";
+    case pingcap::RegionEpochNotMatch:
+        return "RegionEpochNotMatch";
+    case pingcap::CoprocessorError:
+        return "CoprocessorError";
+    case pingcap::TxnNotFound:
+        return "TxnNotFound";
+    case pingcap::NonAsyncCommit:
+        return "NonAsyncCommit";
+    case pingcap::KeyspaceNotEnabled:
+        return "KeyspaceNotEnabled";
+    case pingcap::InternalError:
+        return "InternalError";
+    case pingcap::GRPCNotImplemented:
+        return "GRPCNotImplemented";
+    case pingcap::UnknownError:
+        return "UnknownError";
+    default:
+        return "Unmapped";
+    }
+}
+
+std::string DescribePingcapException(const pingcap::Exception &e)
+{
+    std::ostringstream out;
+    out << "pingcap::Exception{code=" << e.code() << " ("
+        << PingcapErrorCodeName(e.code()) << "), message=\"" << e.message()
+        << "\", display_text=\"" << e.displayText() << "\", what=\""
+        << e.what() << "\"}";
+    return out.str();
+}
+
+std::string DescribePocoException(const Poco::Exception &e)
+{
+    std::ostringstream out;
+    out << "Poco::Exception{code=" << e.code() << ", message=\""
+        << e.message() << "\", display_text=\"" << e.displayText()
+        << "\", what=\"" << e.what() << "\"}";
+    return out.str();
+}
+
+std::string DescribeStdException(const std::exception &e)
+{
+    std::ostringstream out;
+    out << "std::exception{what=\"" << e.what() << "\"}";
+    return out.str();
+}
+
+std::string ByteStringForLog(std::string_view value, size_t max_bytes = 64)
+{
+    std::ostringstream out;
+    out << "size=" << value.size() << ", hex=\"";
+    out << std::hex << std::setfill('0');
+    const size_t bytes_to_print = std::min(value.size(), max_bytes);
+    for (size_t i = 0; i < bytes_to_print; ++i)
+    {
+        out << std::setw(2)
+            << static_cast<unsigned int>(
+                   static_cast<unsigned char>(value[i]));
+    }
+    if (value.size() > max_bytes)
+    {
+        out << "...";
+    }
+    out << "\"";
+    return out.str();
+}
+
+std::string DescribeMutations(const std::vector<KvMutation> &mutations)
+{
+    size_t puts = 0;
+    size_t deletes = 0;
+    size_t total_key_bytes = 0;
+    size_t total_value_bytes = 0;
+    size_t min_key_bytes = std::numeric_limits<size_t>::max();
+    size_t max_key_bytes = 0;
+    size_t min_value_bytes = std::numeric_limits<size_t>::max();
+    size_t max_value_bytes = 0;
+
+    for (const KvMutation &mutation : mutations)
+    {
+        total_key_bytes += mutation.key.size();
+        min_key_bytes = std::min(min_key_bytes, mutation.key.size());
+        max_key_bytes = std::max(max_key_bytes, mutation.key.size());
+
+        if (mutation.op == KvMutation::Op::Put)
+        {
+            ++puts;
+            total_value_bytes += mutation.value.size();
+            min_value_bytes = std::min(min_value_bytes, mutation.value.size());
+            max_value_bytes = std::max(max_value_bytes, mutation.value.size());
+        }
+        else
+        {
+            ++deletes;
+        }
+    }
+
+    if (mutations.empty())
+    {
+        min_key_bytes = 0;
+    }
+    if (puts == 0)
+    {
+        min_value_bytes = 0;
+    }
+
+    std::ostringstream out;
+    out << "mutations{count=" << mutations.size() << ", puts=" << puts
+        << ", deletes=" << deletes << ", total_key_bytes="
+        << total_key_bytes << ", total_value_bytes=" << total_value_bytes
+        << ", min_key_bytes=" << min_key_bytes
+        << ", max_key_bytes=" << max_key_bytes
+        << ", min_value_bytes=" << min_value_bytes
+        << ", max_value_bytes=" << max_value_bytes;
+    if (!mutations.empty())
+    {
+        out << ", first_key{" << ByteStringForLog(mutations.front().key)
+            << "}, last_key{" << ByteStringForLog(mutations.back().key)
+            << "}";
+    }
+    out << "}";
+    return out.str();
 }
 
 void SetGetRequestContext(kvrpcpb::GetRequest &request,
@@ -117,10 +276,27 @@ bool TikvKvClient::Initialize(const TikvConfig &config)
         cluster_->setBackoffObserver(tikv_metrics::CollectBackoffMetric);
         return true;
     }
+    catch (const pingcap::Exception &e)
+    {
+        const std::string error = DescribePingcapException(e);
+        SetLastError(error);
+        LOG(ERROR) << "Failed to initialize TiKV client: " << error;
+        cluster_.reset();
+        return false;
+    }
+    catch (const Poco::Exception &e)
+    {
+        const std::string error = DescribePocoException(e);
+        SetLastError(error);
+        LOG(ERROR) << "Failed to initialize TiKV client: " << error;
+        cluster_.reset();
+        return false;
+    }
     catch (const std::exception &e)
     {
-        SetLastError(e.what());
-        LOG(ERROR) << "Failed to initialize TiKV client: " << e.what();
+        const std::string error = DescribeStdException(e);
+        SetLastError(error);
+        LOG(ERROR) << "Failed to initialize TiKV client: " << error;
         cluster_.reset();
         return false;
     }
@@ -220,10 +396,25 @@ KvGetResult TikvKvClient::Get(const std::string &key)
             return KvGetResult{true, response.value()};
         }
     }
+    catch (const pingcap::Exception &e)
+    {
+        const std::string error = DescribePingcapException(e);
+        SetLastError(error);
+        LOG(ERROR) << "TiKV Get failed: " << error;
+        throw;
+    }
+    catch (const Poco::Exception &e)
+    {
+        const std::string error = DescribePocoException(e);
+        SetLastError(error);
+        LOG(ERROR) << "TiKV Get failed: " << error;
+        throw;
+    }
     catch (const std::exception &e)
     {
-        SetLastError(e.what());
-        LOG(ERROR) << "TiKV Get failed: " << e.what();
+        const std::string error = DescribeStdException(e);
+        SetLastError(error);
+        LOG(ERROR) << "TiKV Get failed: " << error;
         throw;
     }
 }
@@ -260,10 +451,28 @@ bool TikvKvClient::CommitBatch(const std::vector<KvMutation> &mutations)
         txn.commit();
         return true;
     }
+    catch (const pingcap::Exception &e)
+    {
+        const std::string error = DescribePingcapException(e);
+        SetLastError(error);
+        LOG(ERROR) << "TiKV CommitBatch failed: " << error << ", "
+                   << DescribeMutations(mutations);
+        return false;
+    }
+    catch (const Poco::Exception &e)
+    {
+        const std::string error = DescribePocoException(e);
+        SetLastError(error);
+        LOG(ERROR) << "TiKV CommitBatch failed: " << error << ", "
+                   << DescribeMutations(mutations);
+        return false;
+    }
     catch (const std::exception &e)
     {
-        SetLastError(e.what());
-        LOG(ERROR) << "TiKV CommitBatch failed: " << e.what();
+        const std::string error = DescribeStdException(e);
+        SetLastError(error);
+        LOG(ERROR) << "TiKV CommitBatch failed: " << error << ", "
+                   << DescribeMutations(mutations);
         return false;
     }
 }
@@ -350,10 +559,36 @@ bool TikvKvClient::DeleteKeysIf(
         }
         return true;
     }
+    catch (const pingcap::Exception &e)
+    {
+        const std::string error = DescribePingcapException(e);
+        SetLastError(error);
+        LOG(ERROR) << "TiKV DeleteKeysIf failed: " << error
+                   << ", keys_count=" << keys.size();
+        if (result != nullptr)
+        {
+            result->deleted_items = 0;
+        }
+        return false;
+    }
+    catch (const Poco::Exception &e)
+    {
+        const std::string error = DescribePocoException(e);
+        SetLastError(error);
+        LOG(ERROR) << "TiKV DeleteKeysIf failed: " << error
+                   << ", keys_count=" << keys.size();
+        if (result != nullptr)
+        {
+            result->deleted_items = 0;
+        }
+        return false;
+    }
     catch (const std::exception &e)
     {
-        SetLastError(e.what());
-        LOG(ERROR) << "TiKV DeleteKeysIf failed: " << e.what();
+        const std::string error = DescribeStdException(e);
+        SetLastError(error);
+        LOG(ERROR) << "TiKV DeleteKeysIf failed: " << error
+                   << ", keys_count=" << keys.size();
         if (result != nullptr)
         {
             result->deleted_items = 0;
@@ -395,10 +630,43 @@ KvScanResult TikvKvClient::Scan(const KvScanOptions &options)
         result.next_cursor = StripKeyPrefix(tikv_result.next_start_key);
         return result;
     }
+    catch (const pingcap::Exception &e)
+    {
+        const std::string error = DescribePingcapException(e);
+        SetLastError(error);
+        LOG(ERROR) << "TiKV Scan failed: " << error
+                   << ", start_key{" << ByteStringForLog(options.start_key)
+                   << "}, end_key{" << ByteStringForLog(options.end_key)
+                   << "}, limit=" << options.limit
+                   << ", reverse=" << options.reverse
+                   << ", key_only=" << options.key_only
+                   << ", version=" << options.version;
+        throw;
+    }
+    catch (const Poco::Exception &e)
+    {
+        const std::string error = DescribePocoException(e);
+        SetLastError(error);
+        LOG(ERROR) << "TiKV Scan failed: " << error
+                   << ", start_key{" << ByteStringForLog(options.start_key)
+                   << "}, end_key{" << ByteStringForLog(options.end_key)
+                   << "}, limit=" << options.limit
+                   << ", reverse=" << options.reverse
+                   << ", key_only=" << options.key_only
+                   << ", version=" << options.version;
+        throw;
+    }
     catch (const std::exception &e)
     {
-        SetLastError(e.what());
-        LOG(ERROR) << "TiKV Scan failed: " << e.what();
+        const std::string error = DescribeStdException(e);
+        SetLastError(error);
+        LOG(ERROR) << "TiKV Scan failed: " << error
+                   << ", start_key{" << ByteStringForLog(options.start_key)
+                   << "}, end_key{" << ByteStringForLog(options.end_key)
+                   << "}, limit=" << options.limit
+                   << ", reverse=" << options.reverse
+                   << ", key_only=" << options.key_only
+                   << ", version=" << options.version;
         throw;
     }
 }
@@ -449,10 +717,31 @@ bool TikvKvClient::DeleteRange(const std::string &start_key,
             cursor = scan_result.next_start_key;
         }
     }
+    catch (const pingcap::Exception &e)
+    {
+        const std::string error = DescribePingcapException(e);
+        SetLastError(error);
+        LOG(ERROR) << "TiKV DeleteRange failed: " << error
+                   << ", start_key{" << ByteStringForLog(start_key)
+                   << "}, end_key{" << ByteStringForLog(end_key) << "}";
+        return false;
+    }
+    catch (const Poco::Exception &e)
+    {
+        const std::string error = DescribePocoException(e);
+        SetLastError(error);
+        LOG(ERROR) << "TiKV DeleteRange failed: " << error
+                   << ", start_key{" << ByteStringForLog(start_key)
+                   << "}, end_key{" << ByteStringForLog(end_key) << "}";
+        return false;
+    }
     catch (const std::exception &e)
     {
-        SetLastError(e.what());
-        LOG(ERROR) << "TiKV DeleteRange failed: " << e.what();
+        const std::string error = DescribeStdException(e);
+        SetLastError(error);
+        LOG(ERROR) << "TiKV DeleteRange failed: " << error
+                   << ", start_key{" << ByteStringForLog(start_key)
+                   << "}, end_key{" << ByteStringForLog(end_key) << "}";
         return false;
     }
 }
